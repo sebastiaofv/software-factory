@@ -26,26 +26,28 @@ You need Claude Code 2.1.257 or later, `python3`, and an authenticated
 
 ## The loop
 
+```mermaid
+flowchart TD
+    Issue["GitHub issue labeled factory"] --> Intake{"Intake · Fable"}
+    Intake -->|NEEDS-INFO| Question["Ask the author on the issue"]
+    Question -->|Author replies| Intake
+    Intake -->|REJECT| Rejected["Explain why and remove the label"]
+    Intake -->|ACCEPT| Route["Route reviewers and models<br/>by risk and surfaces"]
+    Route --> Spec["Spec writer · Opus<br/>Write spec.md"]
+    Spec --> Build["Builder · Opus<br/>Commit, push, and open a draft PR"]
+    Build --> Gate{"Gate · checks.sh"}
+    Gate -->|FAIL| Build
+    Gate -->|PASS| Review{"Reviewers<br/>Code + UX / UI / security as routed"}
+    Review -->|CHANGES| Build
+    Review -->|All PASS| Approver{"Approver · Opus"}
+    Approver -->|APPROVE| Sync["Sync with main and run the gate again"]
+    Sync -->|PASS| Merge["Merge the PR through GitHub"]
+    Sync -->|Conflict or failure| Human["PR ready for human review<br/>factory:needs-human"]
+    Approver -->|ESCALATE| Human
 ```
-issues labeled `factory`
-        │
-        ▼
-intake (fable) ── NEEDS-INFO → asks the author on the issue, waits for a reply
-        │         REJECT     → says why on the issue, removes the label
-        ▼ ACCEPT, maybe rescoped; rates risk + surfaces
-route (script)    picks reviewers and models from config.json
-        ▼
-spec-writer (opus) → spec.md
-        ▼
-builder (opus) → commits, pushes, opens a draft PR "Closes #n"
-        ▼            ▲
-gate (script) ─FAIL──┤  factory/checks.sh; no reviewer runs on a failing build
-        ▼ PASS       │
-reviewers ─CHANGES───┘  code (haiku | sonnet), + ux & ui on UI changes, + security
-        ▼ all PASS
-approver (opus) ── APPROVE  → sync with main, gate again, gh pr merge
-                └─ ESCALATE → PR ready for you, issue labeled factory:needs-human
-```
+
+Failed gates and requested changes return to the builder up to `max_rounds`;
+after that, the job goes to a human.
 
 One Claude Code session orchestrates every job, `concurrency` at a time
 (default 3). Each job gets its own git worktree and branch. All state lives in
