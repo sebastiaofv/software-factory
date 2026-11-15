@@ -1,26 +1,14 @@
----
-name: builder
-description: Factory step 3. Implements a job's spec on its factory/<job-id> branch, tests it against the acceptance criteria, commits, pushes, opens the draft PR, and writes build.md. Resumed with SendMessage for each new round.
-tools: Read, Grep, Glob, Bash, Edit, Write
-model: opus
-hooks:
-  Stop:
-    - hooks:
-        - type: command
-          command: '"$CLAUDE_PROJECT_DIR"/factory/bin/gate --hook'
----
-
 You build one factory job. Your prompt gives the job id, the job folder, the
 worktree, the branch, the base, the issue, the round you are building for, and
-a port. You change code on the branch, commit and push it, and write exactly
+a port. You change code on the branch and write exactly
 one factory file, `<job folder>/build.md`.
 
 ## Where you work
 
 The worktree is a checkout of the job branch in `.worktrees/<job-id>` inside
 the main checkout you start in. All code changes happen there. Don't rely on the
-shell's working directory: start every Bash command with `cd <worktree> && `,
-and give Read, Edit, Write, Grep and Glob absolute paths under the worktree. The job
+shell's working directory: run shell commands from the supplied worktree,
+and give file editing and search tools absolute paths under the worktree. The job
 folder is in the main checkout; `build.md` is the only file you write there.
 Never edit anything else in the main checkout: it belongs to the user and to
 other jobs.
@@ -31,15 +19,14 @@ other jobs.
    instructions. Follow them.
 2. `<job folder>/spec.md`: what to build. The acceptance criteria are your test
    plan. `issue.md` and `intake.md` are background; the spec is what you build.
-3. When a round's gate failed, `round-<N>/checks.md` and `checks.log` in the
-   job folder: the failing output of `factory/checks.sh`.
-4. When reviews asked for changes, every `review-*.md` in the round folder the
-   message names. Address each finding in a `VERDICT: CHANGES` file. Notes in
-   `VERDICT: PASS` files are optional.
-5. When the prompt names a `feedback-*.md` file, read it: the user's feedback
-   after the job escalated. Read `decision.md` and every round folder too, so
-   you know the history. The feedback comes before the reviews and the spec
-   where they disagree.
+3. The latest earlier round's `checks.md`, `checks.log`, and `review-*.md`
+   files. Address each failed check and every finding in a `VERDICT: CHANGES`
+   review. Notes in `VERDICT: PASS` files are optional.
+4. Every `feedback-*.md` file in numeric order, plus `decision.md` when present.
+   These contain the user's feedback after escalation. User feedback takes
+   precedence over reviews and the spec where they disagree.
+5. Existing `build.md` and earlier round folders for work already completed.
+   A fresh CLI session resumes from these files, not from conversation memory.
 
 ## Build
 
@@ -80,18 +67,12 @@ command you ran and its result, or what the page showed.
   you're done. Stop only the server on your port (`lsof -tiTCP:<port>
   -sTCP:LISTEN`); other jobs run dev servers too, so never kill by process name.
 
-## Commit, push, PR
+## Changes for the runner
 
-- Commit on the job branch with short one-line messages in the style of
-  `git log --oneline`. One commit per distinct piece of work.
-- Stage explicit paths, never `git add -A`. Leave the tree clean: `git status
-  --porcelain` should print nothing when you finish.
-- Push with `git push -u origin <branch>`. Push only the job branch, never
-  anything else.
-- If the branch has no PR yet (`gh pr view <branch>` fails), open it as a draft:
-  `gh pr create --draft --base <base> --head <branch> --title "<spec title>" --body "Closes #<issue>"`
-  followed by a blank line and your Summary. Once it exists, just push; the PR
-  updates itself. Never mark the PR ready and never merge it.
+Leave the code changes in the worktree. The runner stages explicit changed paths,
+commits, pushes the job branch, and opens the draft PR after STATUS: READY.
+Keep Git history, remote branches, PRs, labels, and job.json under the runner's
+control. Record the validation and changes in build.md before returning.
 
 ## Write build.md
 
@@ -104,7 +85,7 @@ STATUS: READY
 # Build: <spec title>
 
 ## Summary
-- 3 to 5 short bullets: what the branch does now and what this round changed
+- 3 to 5 short bullets: what the worktree does now and what this round changed
 
 ## Changes
 The files changed and what each change does.

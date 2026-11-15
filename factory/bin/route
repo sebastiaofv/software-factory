@@ -13,8 +13,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib.config import FactoryError, load_config, agent_set
+
 FACTORY = Path(__file__).resolve().parents[1]
-CONFIG = json.loads((FACTORY / "config.json").read_text())
+CONFIG = load_config(FACTORY.parent)
 
 
 def die(msg):
@@ -32,15 +35,11 @@ def main(argv):
         die(res.stderr.strip())
     job = json.loads((FACTORY / "jobs" / job_id / "job.json").read_text())
     intake = job["intake"] or die(f"{job_id} has no intake.md")
-    risk = CONFIG["routing"].get(intake["risk"]) or die(
-        f"risk {intake['risk']!r} isn't in config.json routing ({', '.join(CONFIG['routing'])})")
-    reviewers = dict(risk)
-    for surface in intake["surfaces"]:
-        extra = CONFIG["surface_reviewers"].get(surface)
-        if extra is None:
-            die(f"surface {surface!r} isn't in config.json surface_reviewers ({', '.join(CONFIG['surface_reviewers'])})")
-        reviewers.update(extra)
-    agents = {"reviewers": reviewers}
+    try:
+        agents = agent_set(CONFIG, intake)
+    except (FactoryError, KeyError) as exc:
+        die(str(exc))
+    reviewers = agents["reviewers"]
     res = subprocess.run([job_bin, "agents", job_id, json.dumps(agents)], capture_output=True, text=True)
     if res.returncode != 0:
         die(res.stderr.strip())

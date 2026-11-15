@@ -4,7 +4,6 @@
 Usage:
   gate <job-id>            write round-N/checks.md; exit 0 on PASS, 1 on FAIL
   gate <job-id> --merge    same, as round-N/merge-checks.md (job merge runs it)
-  gate --hook              builder SubagentStop hook: run the checks once, exit 2 on failure
 
 The gate runs the main checkout's factory/checks.sh inside the job's worktree,
 so a branch can't change the checks it is judged by. It also fails when the
@@ -14,6 +13,8 @@ branch modifies or deletes a file matching config.json `protected_paths`
 
 import fnmatch
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -54,8 +55,22 @@ def protected_changes(worktree):
 
 def run_checks(worktree):
     start = time.monotonic()
-    res = subprocess.run(["bash", str(CHECKS)], cwd=worktree, capture_output=True, text=True)
-    return res.returncode, res.stdout + res.stderr, int(time.monotonic() - start)
+    process = subprocess.Popen(["bash", str(CHECKS)], cwd=worktree, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    timeout = CONFIG["check_timeout_seconds"]
+    try:
+        log, _ = process.communicate(timeout=timeout)
+        code = process.returncode
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            log, _ = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            log, _ = process.communicate()
+        code = 124
+        log += f"\nChecks exceeded {timeout}s.\n"
+    return code, log, int(time.monotonic() - start)
 
 
 def gate(job_id, merge):
@@ -88,28 +103,8 @@ def gate(job_id, merge):
     sys.exit(0 if verdict == "PASS" else 1)
 
 
-def hook():
-    event = json.load(sys.stdin)
-    if event.get("stop_hook_active"):
-        sys.exit(0)  # one nudge per stop; the gate decides
-    with open(Path(event["agent_transcript_path"]).expanduser()) as f:
-        content = json.loads(f.readline())["message"]["content"]
-    prompt = content if isinstance(content, str) else " ".join(b.get("text", "") for b in content)
-    job_id = prompt.split("Job: ", 1)[1].split(".", 1)[0]
-    job = json.loads((FACTORY / "jobs" / job_id / "job.json").read_text())
-    code, log, _ = run_checks(job["worktree"])
-    if code != 0:
-        tail = "\n".join(log.rstrip().splitlines()[-40:])
-        print(f"factory/checks.sh fails in your worktree (exit {code}). The gate will reject this "
-              f"build. Fix it, or write STATUS: BLOCKED in build.md if you can't.\n\n{tail}",
-              file=sys.stderr)
-        sys.exit(2)
-
-
 def main(argv):
-    if argv == ["--hook"]:
-        hook()
-    elif len(argv) == 1 and not argv[0].startswith("-"):
+    if len(argv) == 1 and not argv[0].startswith("-"):
         gate(argv[0], merge=False)
     elif len(argv) == 2 and argv[1] == "--merge":
         gate(argv[0], merge=True)

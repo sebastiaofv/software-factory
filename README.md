@@ -1,135 +1,169 @@
-# Software Factory for Claude Code
+# Software Factory
 
-A software factory that works through your GitHub issues. Label an issue
-`factory`, run `/factory run`, and agents decide whether it's worth building,
-write a spec, build it, test it with your own checks, review it, and open a
-pull request that closes the issue. The approver merges what it's sure of and
-hands you the rest.
+Build GitHub issues through a repeatable pipeline, using your Claude Code and
+Codex subscriptions. Pick a CLI and model independently for intake, specs,
+building, reviews, and approval. A shared Python runner handles job state,
+worktrees, checks, PRs, and merging.
 
 ## Install
 
-Open Claude Code in your project and paste:
+Open Claude Code or Codex in the project you want the factory to work on and ask:
 
 ```text
-Install this software factory in this project from the reference repository:
-
+Install this software factory in this project from:
 https://github.com/sebastiaofv/software-factory
+Follow INSTALL.md and configure the project's real checks.
 ```
 
-Your agent reads [`INSTALL.md`](INSTALL.md), copies the skill, agents, scripts
-and dashboard, fills `factory/checks.sh` with your project's real test, lint,
-typecheck and build commands, tailors the reviewers to your stack, creates the
-GitHub labels, and checks that `checks.sh` passes on `main`.
+You need Python 3.9+, Git, an authenticated [GitHub CLI](https://cli.github.com/),
+and whichever coding CLIs your selected profiles use. The default configuration
+uses both Claude Code and Codex. Sign in with your subscription accounts using
+`claude auth login` and `codex login`. No model API integration is needed.
 
-You need Claude Code 2.1.257 or later, `python3`, and an authenticated
-[`gh`](https://cli.github.com/) that can push to the repo.
+Run `factory/bin/factory doctor` after installation. This reference repo leaves
+`factory/checks.sh` as a failing installer template: configure the target
+project's real checks before running jobs. Tests for the factory itself are
+separate: `python3 -m unittest discover -s factory/tests -v`.
 
 ## The loop
 
 ```mermaid
 flowchart TD
-    Issue["GitHub issue labeled factory"] --> Intake{"Intake · Fable"}
+    Issue["GitHub issue labeled factory"] --> Intake{"Intake · configured CLI / model"}
     Intake -->|NEEDS-INFO| Question["Ask the author on the issue"]
-    Question -->|Author replies| Intake
+    Question -->|Author replies and run resumes| Intake
     Intake -->|REJECT| Rejected["Explain why and remove the label"]
-    Intake -->|ACCEPT| Route["Route reviewers and models<br/>by risk and surfaces"]
-    Route --> Spec["Spec writer · Opus<br/>Write spec.md"]
-    Spec --> Build["Builder · Opus<br/>Commit, push, and open a draft PR"]
-    Build --> Gate{"Gate · checks.sh"}
+    Intake -->|ACCEPT| Route["Route reviewers by risk and surfaces"]
+    Route --> Spec["Spec writer · configured CLI / model"]
+    Spec --> Build["Builder · configured CLI / model"]
+    Build --> Publish["Runner commits, pushes, and opens a draft PR"]
+    Publish --> Gate{"Gate · project checks"}
     Gate -->|FAIL| Build
-    Gate -->|PASS| Review{"Reviewers<br/>Code + UX / UI / security as routed"}
+    Gate -->|PASS| Review{"Parallel reviewers · configured CLIs / models"}
     Review -->|CHANGES| Build
-    Review -->|All PASS| Approver{"Approver · Opus"}
-    Approver -->|APPROVE| Sync["Sync with main and run the gate again"]
+    Review -->|All PASS| Approver{"Approver · configured CLI / model"}
+    Approver -->|APPROVE| Sync["Sync with base branch and run the gate again"]
     Sync -->|PASS| Merge["Merge the PR through GitHub"]
-    Sync -->|Conflict or failure| Human["PR ready for human review<br/>factory:needs-human"]
+    Sync -->|Conflict or failure| Human["Human review · factory:needs-human"]
     Approver -->|ESCALATE| Human
 ```
 
-Failed gates and requested changes return to the builder up to `max_rounds`;
-after that, the job goes to a human.
-
-One Claude Code session orchestrates every job, `concurrency` at a time
-(default 3). Each job gets its own git worktree and branch. All state lives in
-`factory/jobs/`, so if the session dies, `/factory run` picks every job back up.
+Failed checks and requested changes return to the builder up to `max_rounds`;
+after that, the job goes to a human. A blocked builder also escalates.
+The runner runs up to `concurrency` jobs at once. Reviewers within each job run
+in parallel. Each job gets its own `.worktrees/<job-id>` checkout.
 
 ## Commands
 
-```
-/factory run          drain the queue: every open `factory` issue, `concurrency` at a time; also resumes
-/factory run <n>      one issue now
-/factory <anything>   talk to the factory: ask about jobs, give feedback, file a feature
+Label an open issue `factory`, then run from the repository root:
+
+```bash
+factory/bin/factory doctor       # configuration, logins, and installation
+factory/bin/factory run          # drain the queue; also resume interrupted jobs
+factory/bin/factory run 12       # one issue
+factory/bin/factory status       # local jobs and usage
 ```
 
-You approve by merging the PR on GitHub. To change an escalated PR, tell the
-factory what you want with `/factory`. To drop a job that waits on you or on
-its author, tell the factory to reject it.
+In Claude Code, use `/factory run` or `/factory run 12`. In Codex, invoke the
+factory skill with `$factory` and ask it to run the queue or issue 12. Both
+entry points execute the same runner; the host chat does not determine which
+CLI builds or reviews the job.
 
-## What's in here
+Give feedback on an escalated job through either skill, or use
+`factory/bin/job feedback <issue>` with your feedback on stdin and then rerun
+that issue. Reject a waiting job with `factory/bin/job reject <issue>` and a
+reason on stdin. You can also approve an escalated PR by merging it on GitHub.
 
+## Choose CLIs and models
+
+`factory/config.json` defines named profiles. Each profile selects `claude` or
+`codex`, an optional model, and optional `reasoning_effort`. A null model or
+effort uses that CLI's current default. Choose models available to your account.
+
+```json
+{
+  "profiles": {
+    "claude-strong": { "cli": "claude", "model": "opus" },
+    "codex": { "cli": "codex", "model": null, "reasoning_effort": null }
+  },
+  "steps": {
+    "intake": "codex",
+    "spec-writer": "codex",
+    "builder": "claude-strong",
+    "approver": "codex"
+  },
+  "routing": {
+    "low": { "code": "codex" },
+    "medium": { "code": "codex" },
+    "high": { "code": "claude-strong" }
+  },
+  "surface_reviewers": {
+    "ui": { "ux": "codex", "ui": "codex" },
+    "security": { "security": "claude-strong" }
+  }
+}
 ```
-.claude/
-  skills/factory/SKILL.md     the orchestrator: queue, concurrency, the pipeline
-  agents/
-    intake.md                 fable    worth building? at what scope? risk + surfaces
-    spec-writer.md            opus     spec.md
-    builder.md                opus     code, commits, the PR, build.md
-    reviewer-code.md          routed   correctness, simplicity, tests
-    reviewer-security.md      opus     only when intake flags `security`
-    reviewer-ux.md            sonnet   only when intake flags `ui`
-    reviewer-ui.md            haiku    only when intake flags `ui`
-    approver.md               opus     APPROVE or ESCALATE
-factory/
-  config.json                 concurrency, rounds, labels, routing, protected paths, prices
-  checks.sh                   your repo's checks (the installer fills it in)
-  bin/job                     the only writer of job.json; refuses illegal moves; merges
-  bin/gate                    runs checks.sh in a job's worktree → round-N/checks.md
-  bin/route                   risk + surfaces → the job's reviewers and models
-  dashboard.html              the board
-examples/jobs/                finished jobs from a real run
-INSTALL.md                    instructions for the installing agent
-DESIGN.md                     how it works and why
-```
+
+This is the profile and routing portion of the configuration; retain the other
+settings. For a single subscription, point every step and reviewer at a profile
+using that CLI. Another CLI requires an adapter that implements authentication,
+command construction, and result parsing in `factory/lib/adapters.py`.
 
 ## Dashboard
 
 ```bash
-cd factory && python3 -m http.server
+python3 -m http.server --bind 127.0.0.1 --directory factory 8000
 ```
 
-Open <http://localhost:8000/dashboard.html>. Each job is a card with its issue
-and PR, a row of gate and review chips per round, its risk, cost and
-time. Click a card to read every file the job wrote; each one opens with a
-short summary of what happened in that step. To see the example
-jobs, copy `examples/jobs/` to `factory/jobs/` first.
+Open <http://localhost:8000/dashboard.html>. Inspect each job's stages, routed
+profiles, usage, check results, and review documents. To view the included
+historical examples, copy `examples/jobs/` to `factory/jobs/` in a fresh checkout.
 
-Cost is the API-equivalent price of each job's agents, read from Claude Code's
-transcripts. On a subscription plan it shows where the spend goes, not what
-you're billed.
+The runner stores native CLI output, prompts, and execution receipts under
+`factory/jobs/<id>/runs/`. Token usage and any available API-equivalent estimate
+are separate from subscription billing. Codex does not report a dollar estimate
+in the supported JSON event stream, so mixed runs show an unavailable estimate
+instead of treating missing cost as zero. Historical examples retain their
+recorded estimates.
 
-## The example jobs
+## What's in here
 
-They come from a test run on a small private calculator repo, with
-`concurrency: 2` and every agent on Haiku to keep it cheap.
+```text
+.agents/skills/factory/     shared Codex skill and workflow entry point
+.claude/skills/factory/     Claude Code entry point to the same workflow
+factory/
+  bin/factory              runner commands: run, doctor, status
+  bin/job                  job state transitions and GitHub side effects
+  bin/gate                 deterministic checks in a job's worktree
+  bin/route                risk and surfaces → execution profiles
+  lib/                     configuration, subscription CLI adapters, scheduler
+  prompts/                 provider-independent role instructions
+  config.json              profiles, routing, concurrency, timeouts, guardrails
+  checks.sh                project checks; filled in during installation
+  dashboard.html           local job board
+  tests/                   temporary-repository tests with fake coding CLIs
+examples/jobs/             historical example artifacts
+INSTALL.md                 installation and upgrade instructions
+DESIGN.md                  execution design, permissions, and recovery limits
+```
 
-- **001-add-a-subtract-function**: low risk, no UI, so only the code reviewer
-  ran. Approved and merged through its PR.
-- **002-show-a-history-of**: a UI change, so the UX and UI reviewers ran too.
-  Merged.
-- **003-add-multiply-divide-power**: intake cut an oversized "scientific
-  calculator" issue down to three functions. The gate failed round 1 because
-  the builder edited a protected test file, and the job went to a human after
-  three rounds.
-- **005-add-a-crypto-miner**: rejected at intake.
+## Subscriptions and permissions
 
-## Cost and safety
-
-- It opens and merges real PRs and runs on your Claude plan. Start with
-  `concurrency: 1` and read every PR until you trust it.
-- Intake runs on Fable once per issue. Depending on your plan, Fable can bill
-  to usage credits rather than your plan's included usage.
-- Only issues labeled `factory` run, and only people with triage or write
-  access can add labels. Issue text reaches the agents as quoted data, never
-  as their instructions.
-- The factory pushes only `factory/*` branches, merges only through
-  `gh pr merge`, and never deploys.
+- Claude Code must report a first-party subscription account; Codex must report
+  ChatGPT login. The adapters refuse detected API-key/provider environment
+  overrides. Your provider's account limits and extra-usage settings still apply.
+  The factory cannot enforce a subscription's spending cap or verify entitlements
+  for every selected model.
+- Claude runs noninteractively with file tools and shell commands allowed;
+  permission prompts are denied. Codex uses its workspace-write sandbox, the
+  job directory as an additional writable directory, and network access enabled
+  for project checks. Neither adapter adds a sandbox-bypass flag. Organization
+  policy and existing CLI configuration may still restrict tools.
+- These CLIs execute repository code with your local account's access. Keep
+  production secrets out of the execution environment. Test UI changes with an
+  installed `agent-browser` CLI as described in the review prompts.
+- Only open issues labeled `factory` start. Agents write bounded role artifacts;
+  the runner owns commits, pushes, PRs, and state transitions. The gate reruns
+  project checks before review and after syncing for merge.
+- Runs open and may merge real PRs. Start with `concurrency: 1`, inspect the
+  results, and tailor escalation rules in `factory/prompts/approver.md`.

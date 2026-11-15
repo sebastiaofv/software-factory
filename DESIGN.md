@@ -1,138 +1,124 @@
 # Design
 
-How the factory works, and why it's built this way. The source is small
-enough to read in one sitting: one skill, eight agents, three scripts and a
-config file.
+The factory separates the workflow from the coding agent that executes a step.
+A Python runner chooses a CLI profile for each role. Claude Code and Codex are
+adapters behind the same execution interface; subscription login stays inside
+the installed CLIs.
 
-## The idea
+## Execution
 
-A software factory turns a queue of requests into merged code with a fixed
-pipeline. Scripts handle the deterministic stages, such as running the tests,
-moving state and merging. Agents do the judgment in between: whether a request
-is worth building, what exactly to build, the code itself, and whether it's
-good. Each stage leaves a file behind, so you can see what happened and why.
-Every step's file opens with a `## Summary` of three to five bullets, so a human can
-skim a job on the dashboard and read the detail only where it matters.
-
-## Pieces
-
-| Piece | File | Job |
-|---|---|---|
-| Queue | GitHub issues labeled `factory` | What to build. Anyone can file an issue; only people with triage or write access can label it. |
-| Orchestrator | `.claude/skills/factory/SKILL.md` | The session that runs `/factory`. Starts jobs, spawns agents, calls the scripts. Writes nothing itself. |
-| Agents | `.claude/agents/*.md` | One file per role. Each reads files, writes exactly one file, and replies with one line. |
-| State | `factory/jobs/<job-id>/` | `job.json` plus every agent's file. Gitignored, local to the machine running the factory. |
-| Spine | `factory/bin/job`, `gate`, `route` | Deterministic. `job` is the only writer of `job.json` and refuses illegal moves. |
-| Checks | `factory/checks.sh` | The repo's test, lint, typecheck and build commands. The only repo-specific script. |
-| Exit | the PR | Every job ends as a PR that closes its issue. Merging it is the approval. |
-
-## Pipeline
-
-```
-intake (fable)     → ACCEPT (scope possibly changed) | NEEDS-INFO | REJECT, posted as an issue comment
-route (script)     → reviewers + models from risk/surfaces via config.json
-worktree           → factory/<job-id> from origin/main
-spec-writer (opus) → spec.md
-builder            → commits; first round pushes + opens draft PR "Closes #<n>"
-gate (script)      → checks.sh; FAIL → builder gets the log, no reviewers spawned
-reviewers (routed) → parallel, WAIT FOR ALL; CHANGES → builder → gate → reviewers (max rounds)
-approver (opus)    → APPROVE: sync origin/main, gate, gh pr merge
-                     ESCALATE: PR ready, decision as PR comment, label factory:needs-human
+```mermaid
+flowchart LR
+    Entry["Terminal, Claude skill, or Codex skill"] --> Runner["Shared Python runner"]
+    Runner --> Claude["Claude Code CLI adapter"]
+    Runner --> Codex["Codex CLI adapter"]
+    Claude --> Files["Role artifacts and execution receipts"]
+    Codex --> Files
+    Files --> State["Validated job transitions and project gate"]
+    State --> Runner
 ```
 
-`stage` in `job.json` is one of `intake`, `needs-info`, `spec`, `build`,
-`gate`, `review`, `approve`, `merging`, `needs-human`, `merged`, `rejected`.
-The legal moves are in `TRANSITIONS` at the top of `factory/bin/job`.
+`factory/lib/runner.py` owns scheduling and the intake → spec → build → gate →
+review → approve loop. `factory/bin/job` is the only writer of job.json and owns
+GitHub transition effects. `factory/bin/gate` runs the main checkout's checks
+inside the job's worktree and rejects modifications to protected paths.
 
-## Decisions
+A role gets its shared prompt, explicit paths, job/round identifiers, and the
+required output file. Each attempt starts a fresh CLI session. Earlier specs,
+build logs, feedback, decisions, and reviews carry context between providers.
+Native session IDs are recorded for diagnosis; cross-provider recovery does not
+attempt to resume a provider's private conversation.
 
-**Issues are the queue; you trigger the run.** `/factory run` drains every open
-`factory` issue. Nothing runs in GitHub Actions or on a schedule: the factory
-runs on your machine, on your Claude plan, when you start it. An issue can't
-start a Claude Code session by itself, and keeping it local means your
-worktrees, dev servers and dashboard are right there.
+The builder edits and verifies code, then writes build.md. The runner commits
+explicit changed paths, pushes only the assigned branch, and opens its draft PR.
+Reviewers run in parallel once the gate passes. The approver escalates sensitive
+changes using the project-specific rules in its prompt. An approval triggers
+base-branch synchronization, another gate, a push, and GitHub's merge command.
 
-**One orchestrator for every job.** The session running `/factory run` starts up
-to `concurrency` jobs and spawns every agent as a background subagent. There
-are no per-job orchestrators to coordinate. Its context stays small because
-agents reply with one line and the scripts print one line; the detail lives in
-files the next agent reads. Claude Code allows 20 concurrent subagents per
-session by default, which covers three jobs with four reviewers each.
+## Configuration
 
-**Fable at the door, once.** Intake is the only Fable call per job. It decides
-whether the issue is worth building, rewrites the scope when the issue is too
-big or vague, and asks the author when only they can answer. Its decision goes
-on the issue as a comment; the issue body stays as written. Questions go to
-the author before a spec exists, so the spec writer never stalls on one.
+Profiles contain `cli`, optional `model`, and optional `reasoning_effort`.
+`steps` selects profiles for intake, spec-writer, builder, and approver.
+`routing` supplies reviewers by risk; `surface_reviewers` adds UI or security
+reviewers. All selected roles resolve through the same profile mechanism.
+Unsupported CLIs or profile references fail configuration validation.
 
-**Risk routes the work, a script does the routing.** Intake rates risk (`low`,
-`medium`, `high`) and surfaces (`ui`, `security`). `factory/bin/route` looks
-them up in `config.json`:
+Routing snapshots profile names into the accepted job. Profile settings are
+resolved at execution time and recorded with each attempt. Editing a profile
+changes future attempts; completed-stage reuse requires an exact profile match.
+`step_timeout_seconds` bounds coding CLI calls and `check_timeout_seconds`
+bounds project checks. Runner commands receive another 30 seconds for startup,
+cleanup, and writing failure reports.
 
-| | code review | ux | ui | security |
-|---|---|---|---|---|
-| low | Haiku | | | |
-| medium | Sonnet | | | |
-| high | Sonnet | | | |
-| + `ui` surface | | Sonnet | Haiku | |
-| + `security` surface | | | | Opus |
+The execution module's public work is to verify login, construct a CLI command,
+execute it with a bounded lifetime, and normalize its result. Adding another
+subscription-backed CLI requires implementing those operations and authentication
+checks. A provider's OpenAI-compatible endpoint alone is insufficient: a coding
+CLI must also supply file, command, and context-management tools.
 
-The builder always runs on Opus.
+## Authentication and permissions
 
-A low-risk change with no UI runs one Haiku reviewer. Routing is visible in
-one file and changes without touching a prompt.
+The Claude adapter checks `claude auth status` for first-party subscription
+login. The Codex adapter checks `codex login status` for ChatGPT login and pins
+the run to the OpenAI provider and ChatGPT login method. Both reject recognized
+API-key or alternate-provider environment settings without printing their values.
+The runner does not read, copy, or store access tokens. It does not use Claude's
+`--bare` mode, which does not load subscription credentials.
 
-**Scripts decide whether it works.** The gate runs `checks.sh` before any
-reviewer is spawned, and again after syncing with `main` before the merge.
-A failing build goes straight back to the builder with the log. The gate runs
-the main checkout's copy of `checks.sh`, so a branch can't edit the checks it
-is judged by. It fails any branch that modifies or deletes a file under
-`protected_paths`: the factory's own checks and config. Tests aren't
-protected, since features have to update them; the code reviewer fails any
-test that was weakened, skipped or special-cased to pass. The
-builder also has a `SubagentStop` hook that runs the checks before it finishes,
-as a nudge; the gate is still what decides.
+Claude's noninteractive run allows file tools and Bash and denies permission
+prompts. Codex runs in a workspace-write sandbox, adds the job directory for
+artifacts, and enables sandbox network access. The CLI's own policies still
+apply. Prompt instructions scope roles, but are not a separate filesystem
+sandbox for each reviewer. An existing CLI hook or configured integration may
+also affect execution. Native CLI output and prompts can contain sensitive
+project information; keep job directories local.
 
-**Agents judge what scripts can't.** Reviewers don't re-run the test suite;
-they read the diff for correctness, scope, security, UX and visual fit.
+## State and recovery
 
-**A PR per issue, merged through GitHub.** The factory merges with
-`gh pr merge`, so branch protection, required checks and the PR history all
-apply, and your main
-checkout is never touched. Before merging, the branch is synced with `main` and
-gated again, because another job may have merged since it was tested.
+- A checkout-level runner lock prevents two schedulers draining the same queue.
+- A shared state-command lock serializes job creation and transitions. Coding
+  CLIs run outside that lock, so separate jobs and reviewers can execute together.
+- Every CLI attempt writes a running receipt before launch and a completed or
+  failed receipt afterward. A successful process must also refresh its required
+  artifact, which must have the role's expected format.
+- Non-builder steps are checked for worktree/history changes. Completed output
+  reuse requires the same role, round, commit, profile, source fingerprint, and artifact checksum.
+- Gate reports bind to the tested commit. A timeout, CLI error, denied required
+  tool, or invalid artifact stops that job without advancing its stage. Other
+  scheduled jobs can finish. Failed jobs are not retried endlessly within a run;
+  rerun after fixing the reported cause.
+- Fresh CLI sessions recover from files. Raw logs and receipts live in
+  `factory/jobs/<id>/runs/<attempt>/`. Interrupted running receipts remain visible.
 
-**You approve by merging.** The approver merges what it would merge itself and
-escalates the rest with a specific question. An escalated PR is ready for
-review and its issue is labeled `factory:needs-human`. Merge it to approve, or
-tell the factory what to change with `/factory <anything>`: your words go to
-the builder as `feedback-<k>.md` and the job runs another round. To drop a
-job that waits on you or on its author, tell the factory to reject it: the
-reason goes on the issue, its PR closes, and the job moves to Done.
+GitHub actions and local state writes are not a distributed transaction. A crash
+between a transition's external effects and its save can still require manual
+reconciliation. Likewise, cancellation during a shell or GitHub operation can
+leave partial effects. Inspect the job and remote PR before resuming such a job.
+Changing or removing a queue label does not cancel an already executing model.
+Full idempotent transition reconciliation and isolated execution containers are
+future work.
 
-**State is files, so runs resume.** Every fact the orchestrator needs is in
-`factory/jobs/`. If the session dies or compacts, a fresh `/factory run` reads
-the queue and resumes every job from its stage.
+## Usage
 
-**Cost is measured per job.** Claude Code writes each subagent's transcript,
-with model and token counts per message, to
-`~/.claude/projects/<project>/<session>/subagents/`. Every factory prompt starts
-with the job's folder, so `factory/bin/job` sums the transcripts that name it
-and prices them with `prices_usd_per_mtok`. The figure is the API-equivalent
-cost of the job's agents; on a subscription it shows relative spend, not your
-bill. The orchestrator's own tokens aren't attributed to a job. The
-transcript format isn't a documented interface, so a Claude Code update could
-break this.
+Each adapter reads only its invocation's documented output format: Claude's
+JSON result or Codex's JSONL events. Receipts record CLI, requested profile,
+reported models when available, normalized token usage, session ID, and timestamps.
+No scan of private CLI transcript directories is required.
 
-## Guardrails
+Input-token totals include cached reads and cache writes for both adapters; native
+fields remain available in each invocation log. job.json aggregates the normalized
+token fields and execution metadata from receipts.
+A dollar estimate is shown only when every attempt reports one. Partial cost
+data remains in receipts; it is never presented as a complete total. These
+estimates are API-equivalent and do not describe subscription invoices. Missing
+usage does not prevent a job from advancing.
 
-- Only issues labeled `factory` run. Labels need triage or write access, so the
-  label is the trust boundary.
-- Issue text reaches agents as quoted data in `issue.md`, with comments only
-  from the issue's author and the factory's operator. It is never part of a
-  prompt. Intake, which reads it first, has no shell.
-- Agents push only `factory/*` branches. Only `factory/bin/job merge` merges,
-  through `gh pr merge`. The factory never deploys.
-- One PR per issue; at most `max_rounds` build rounds per job before a human
-  is asked.
+## Verification
 
+`python3 -m unittest discover -s factory/tests -v` exercises the real scripts
+against temporary Git repositories, a local bare origin, and fake coding/GitHub
+CLIs. It covers mixed-provider routing, failed checks, requested review changes,
+merging, restart after CLI failure, subscription-login rejection, CLI/check
+timeouts, signal cancellation, stale artifacts and source changes,
+configuration validation, duplicate creation, and scheduler locking. It makes
+no model requests and changes no real GitHub issues or PRs.

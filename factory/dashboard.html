@@ -105,10 +105,11 @@
   .links { display: flex; gap: 10px; font-family: var(--mono); font-size: 11px; }
   .links a { color: var(--active); text-decoration: none; }
   .links a:hover { text-decoration: underline; }
-  .meta { display: flex; gap: 10px; margin-top: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+  .meta { display: flex; flex-wrap: wrap; gap: 5px 10px; margin-top: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
   .meta .risk-high { color: var(--human); } .meta .risk-medium { color: var(--changes); }
   .chip.gate { flex: 0 0 38px; }
   .chip.FAIL { border: 1px solid transparent; color: var(--human); background: color-mix(in srgb, var(--human) 16%, transparent); }
+  .execution { margin-top: 7px; font: 10px/1.5 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
   .branch {
     font-family: var(--mono); font-size: 11px; color: var(--faint);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -260,9 +261,9 @@
 <div id="banner"></div>
 <main class="board" id="board"></main>
 <footer>
-  <span>/factory run</span>
-  <span>/factory run &lt;n&gt;</span>
-  <span>/factory &lt;anything&gt;</span>
+  <span>factory/bin/factory run</span>
+  <span>Claude: /factory</span>
+  <span>Codex: $factory</span>
   <span id="totals"></span>
 </footer>
 
@@ -285,8 +286,8 @@
 <script>
 const POLL_MS = 2000
 const COLUMNS = [
-  { label: 'Intake', who: 'intake · fable', stages: ['intake', 'needs-info'] },
-  { label: 'Spec', who: 'spec-writer · opus', stages: ['spec'] },
+  { label: 'Intake', who: 'triage', stages: ['intake', 'needs-info'] },
+  { label: 'Spec', who: 'spec-writer', stages: ['spec'] },
   { label: 'Build', who: 'builder · gate', stages: ['build', 'gate'] },
   { label: 'Review', who: 'routed reviewers', stages: ['review'] },
   { label: 'Approve', who: 'approver · merge', stages: ['approve', 'merging'] },
@@ -302,6 +303,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
 
 let jobs = []
+let factoryConfig = null
 let lastRender = ''
 const roundCache = new Map() // "<job>/<n>" -> verdicts of a finished round
 let openJobId = null
@@ -365,6 +367,31 @@ function elapsed(job) {
 }
 
 // The example jobs keep their issue and PR numbers but have no URLs.
+function costLabel(job) {
+  return typeof job.cost_usd === 'number' ? `$${job.cost_usd.toFixed(2)} est.` : 'estimate n/a'
+}
+
+function tokenLabel(job) {
+  const usage = job.usage?.tokens
+  if (!usage || typeof usage.input_tokens !== 'number' || typeof usage.output_tokens !== 'number') return ''
+  return `${(usage.input_tokens + usage.output_tokens).toLocaleString()} tokens`
+}
+
+function profileLabel(name) {
+  const profile = factoryConfig?.profiles?.[name]
+  return profile ? `${profile.cli} / ${profile.model || 'CLI default'}` : name || ''
+}
+
+function executionLabel(job) {
+  const roles = { intake: 'intake', 'needs-info': 'intake', spec: 'spec-writer', build: 'builder', gate: 'builder', approve: 'approver', merging: 'approver' }
+  const role = roles[job.stage]
+  if (job.stage === 'review') return [...new Set(Object.values(job.agents?.reviewers || {}).map(profileLabel))].join(' · ')
+  const runs = job.usage?.executions || []
+  const execution = [...runs].reverse().find((r) => !role || r.role === role)
+  if (execution?.profile) return `${execution.profile.cli} / ${execution.profile.model || 'CLI default'}`
+  return role ? profileLabel(job.agents?.[role]) : ''
+}
+
 const link = (url, text) =>
   url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${text}</a>` : `<span>${text}</span>`
 
@@ -385,8 +412,9 @@ function card(job, rounds) {
   const risk = job.intake?.risk
   const meta = [
     risk ? `<span class="risk-${esc(risk)}">${esc(risk)}</span>` : '',
-    `<span>$${Number(job.cost_usd).toFixed(2)}</span>`,
+    `<span>${costLabel(job)}</span>`,
     `<span>${elapsed(job)}</span>`,
+    tokenLabel(job) ? `<span>${esc(tokenLabel(job))}</span>` : '',
   ].join('')
   return `
     <article class="card ${live ? 'live' : ''} ${human ? 'human' : ''} ${done ? 'done' : ''} ${job.stage}"
@@ -398,9 +426,10 @@ function card(job, rounds) {
       </div>
       <p class="feature">${esc(job.title)}</p>
       <div class="links">${links(job)}</div>
+      ${executionLabel(job) ? `<div class="execution">${esc(executionLabel(job))}</div>` : ''}
       ${rounds.length ? `<div class="rounds">${rounds.join('')}</div>` : ''}
       <div class="meta">${meta}</div>
-      ${human ? `<div class="hint">${job.pr ? `merge PR #${job.pr} to approve<br>` : ''}or give feedback: /factory &lt;anything&gt;</div>` : ''}
+      ${human ? `<div class="hint">${job.pr ? `merge PR #${job.pr} to approve<br>` : ''}or give feedback with the factory skill</div>` : ''}
     </article>`
 }
 
@@ -429,13 +458,17 @@ async function render() {
     $('banner').innerHTML = banner
   }
   const running = jobs.filter((j) => LIVE.has(j.stage)).length
-  const cost = jobs.reduce((sum, j) => sum + Number(j.cost_usd), 0)
-  $('totals').textContent = `${running} running · $${cost.toFixed(2)} API-equivalent`
+  const known = jobs.filter((j) => typeof j.cost_usd === 'number')
+  const cost = known.reduce((sum, j) => sum + j.cost_usd, 0)
+  const missing = jobs.length - known.length
+  const estimate = known.length ? `$${cost.toFixed(2)} known API-equivalent estimates` : 'API-equivalent estimates unavailable'
+  $('totals').textContent = `${running} running · ${estimate}${missing ? ` · ${missing} unavailable` : ''} · subscription billing is separate`
 }
 
 async function poll() {
   const status = $('status')
   try {
+    if (!factoryConfig) factoryConfig = JSON.parse(await fetchText('config.json'))
     jobs = await loadJobs()
     await render()
     if (openJobId) await refreshDrawer()
@@ -503,7 +536,7 @@ const firstLines = new Map()
 async function refreshDrawer() {
   const job = jobs.find((j) => j.id === openJobId)
   if (!job) return
-  $('d-num').textContent = `${job.id} · ${job.stage}${job.round ? ` · round ${job.round}` : ''} · $${Number(job.cost_usd).toFixed(2)} · ${elapsed(job)}`
+  $('d-num').textContent = `${job.id} · ${job.stage}${job.round ? ` · round ${job.round}` : ''} · ${costLabel(job)} · ${elapsed(job)}${executionLabel(job) ? ` · ${executionLabel(job)}` : ''}${tokenLabel(job) ? ` · ${tokenLabel(job)}` : ''}`
   $('d-title').textContent = job.title
   $('d-links').innerHTML = links(job)
 
