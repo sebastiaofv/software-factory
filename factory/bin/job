@@ -39,6 +39,13 @@ CONFIG = load_config(REPO)
 LABELS = CONFIG["labels"]
 BASE = CONFIG["base_branch"]
 MARKER = "<!-- factory -->"
+GRILL_FOOTER = (
+    "---\n\n"
+    "**How to answer:** reply in one comment on this issue, by question number "
+    "(for example `Q2: the second option, because ...`). Reply `go with your recommendations` "
+    "to accept every ➡️ recommended answer, or mix the two. Only replies from the issue's author "
+    "and the factory's operator count. The factory picks the issue up again on its next run."
+)
 
 TRANSITIONS = {
     "intake": {"needs-info", "rejected", "spec"},
@@ -280,6 +287,8 @@ def sync(job):
             "decision": h.get("DECISION"),
             "rescoped": h.get("RESCOPED") == "yes",
             "risk": h.get("RISK"),
+            "track": h.get("TRACK"),
+            "grill_round": len(list(d.glob("intake-*.md"))) + 1,
             "surfaces": [s.strip() for s in h.get("SURFACES", "").split(",")
                          if s.strip() and s.strip() != "none"],
         }
@@ -360,11 +369,15 @@ def advance(job, stage):
         want = {"needs-info": "NEEDS-INFO", "rejected": "REJECT", "spec": "ACCEPT"}[stage]
         require(decision == want, f"intake.md says DECISION: {decision}, not {want}")
         title = f"### Factory intake: {decision}"
+        footer = ""
         if stage == "spec":
             require(job["agents"], "route the job first: factory/bin/route " + job["id"])
             i = job["intake"]
-            title += f" (risk {i['risk']}, surfaces: {', '.join(i['surfaces']) or 'none'})"
-        comment("issue", job["issue"], f"{title}\n\n{intake_body()}")
+            title += f" ({i['track']} track, risk {i['risk']}, surfaces: {', '.join(i['surfaces']) or 'none'})"
+        elif stage == "needs-info":
+            title = f"### Factory grilling: round {job['intake']['grill_round']}"
+            footer = f"\n\n{GRILL_FOOTER}"
+        comment("issue", job["issue"], f"{title}\n\n{intake_body()}{footer}")
         if stage == "needs-info":
             label("issue", job["issue"], add=LABELS["needs_info"])
         elif stage == "rejected":
@@ -536,7 +549,8 @@ def cmd_queue():
             if replied_since_question(fetch_issue(n)):
                 replied_rows.append(("resume", n, j["id"], j["stage"], "author replied"))
             else:
-                other_rows.append(("wait", n, j["id"], j["stage"], "waiting for the author"))
+                other_rows.append(("wait", n, j["id"], j["stage"],
+                                   f"waiting for answers to grilling round {(j['intake'] or {}).get('grill_round') or '?'}"))
         elif j["stage"] == "needs-human":
             other_rows.append(("wait", n, j["id"], j["stage"], f"merge PR #{j['pr']}, or give feedback"
                                if j["pr"] else "give feedback"))

@@ -73,6 +73,70 @@ class FactoryTests(unittest.TestCase):
         self.assertEqual(self.git('show', 'origin/main:calc.py'), 'def add(a, b):\n    return a + b')
         self.assertEqual(self.git('status', '--porcelain'), '')
 
+    def github(self):
+        return json.loads((self.base / 'fake-github.json').read_text())
+
+    def test_grilling_waits_on_the_issue_then_resumes_with_the_answers(self):
+        with patch.dict(os.environ, {'FACTORY_TEST_GRILL': '1'}):
+            self.runner.run(1)
+            job = self.runner.job('001-add-numbers')
+            self.assertEqual(job['stage'], 'needs-info')
+            self.assertEqual(job['intake']['grill_round'], 1)
+            [question] = self.github()['comments']
+            self.assertIn('### Factory grilling: round 1', question['body'])
+            self.assertIn('➡️ Yes, Python ints are unbounded.', question['body'])
+            self.assertIn('go with your recommendations', question['body'])
+            self.assertIn(['--add-label', 'factory:needs-info'], self.github()['label_edits'])
+            self.assertIn('waiting for answers to grilling round 1', self.runner.job_command('queue'))
+            self.runner.run(1)
+            self.assertEqual(self.runner.job(job['id'])['stage'], 'needs-info')
+
+            state = self.github()
+            state['comments'].append({'author': {'login': 'factory-test'}, 'body': 'go with your recommendations',
+                                      'createdAt': '2026-01-02T00:00:00Z'})
+            (self.base / 'fake-github.json').write_text(json.dumps(state))
+            self.runner.run(1)
+        folder = self.repo / 'factory/jobs' / job['id']
+        job = self.runner.job(job['id'])
+        self.assertEqual(job['stage'], 'merged')
+        self.assertEqual(job['intake']['track'], 'simple')
+        self.assertEqual(job['intake']['grill_round'], 2)
+        self.assertTrue((folder / 'intake-1.md').read_text().startswith('DECISION: NEEDS-INFO'))
+        self.assertIn('go with your recommendations', (folder / 'issue.md').read_text())
+        prompts = {}
+        for path in sorted(folder.glob('runs/*/prompt.txt')):
+            prompts.setdefault(path.parent.name.split('-', 1)[1].rsplit('-', 1)[0], []).append(path.read_text())
+        self.assertIn('Grilling round: 2 of at most 3. Questions allowed: yes.', prompts['intake'][1])
+        self.assertIn('Track: simple.', prompts['builder'][0])
+        accepted = [c['body'] for c in self.github()['comments'] if 'Factory intake: ACCEPT' in c['body']]
+        self.assertIn('(simple track, risk low', accepted[0])
+
+    def test_intake_track_and_grilling_limits_are_enforced(self):
+        job_id = self.runner.job_command('create', '1')
+        job = self.runner.job(job_id)
+        folder = self.repo / 'factory/jobs' / job_id
+        path = folder / 'intake.md'
+        header = 'DECISION: {}\nRISK: {}\nTRACK: {}\nSURFACES: none\nRESCOPED: no\n\n## Summary\n- Test.\n'
+        path.write_text(header.format('ACCEPT', 'medium', 'simple'))
+        with self.assertRaisesRegex(FactoryError, 'medium-risk work on the simple track'):
+            self.runner.validate_artifact(job, 'intake', path)
+        path.write_text(header.format('ACCEPT', 'low', 'tiny'))
+        with self.assertRaisesRegex(FactoryError, 'invalid track'):
+            self.runner.validate_artifact(job, 'intake', path)
+        path.write_text(header.format('ACCEPT', 'medium', 'complex'))
+        self.assertEqual(self.runner.validate_artifact(job, 'intake', path), 'DECISION: ACCEPT')
+        for k in range(1, 4):
+            (folder / f'intake-{k}.md').write_text(header.format('NEEDS-INFO', 'low', 'simple'))
+        path.write_text(header.format('NEEDS-INFO', 'low', 'simple'))
+        with self.assertRaisesRegex(FactoryError, 'after 3 grilling rounds'):
+            self.runner.validate_artifact(job, 'intake', path)
+        self.assertIn('Questions allowed: no.', self.runner.prompt(job, 'intake', path))
+        config = load_config(self.repo)
+        config['simple_track_risks'] = ['high']
+        (self.repo / 'factory/config.json').write_text(json.dumps(config))
+        with self.assertRaisesRegex(FactoryError, 'simple_track_risks'):
+            load_config(self.repo)
+
     def test_cli_failure_does_not_advance_and_can_resume(self):
         with patch.dict(os.environ, {'FACTORY_TEST_FAIL_ROLE': 'spec-writer'}):
             with self.assertRaises(FactoryError):
@@ -212,6 +276,15 @@ class FactoryTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort="high"', args)
         self.assertIn('forced_login_method="chatgpt"', args)
         self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', args)
+        claude = dict(config['profiles']['claude-strong'], reasoning_effort='xhigh')
+        args = command(claude, self.repo, self.repo / 'factory/jobs/test')
+        self.assertEqual(args[args.index('--effort') + 1], 'xhigh')
+        self.assertEqual(args[args.index('--model') + 1], 'opus')
+        config['profiles']['claude-strong']['reasoning_effort'] = 'ultra'
+        (self.repo / 'factory/config.json').write_text(json.dumps(config))
+        with self.assertRaisesRegex(FactoryError, 'unsupported reasoning_effort ultra'):
+            load_config(self.repo)
+        config['profiles']['claude-strong']['reasoning_effort'] = None
         config['steps']['builder'] = 'missing'
         (self.repo / 'factory/config.json').write_text(json.dumps(config))
         with self.assertRaisesRegex(FactoryError, 'unknown profile'):

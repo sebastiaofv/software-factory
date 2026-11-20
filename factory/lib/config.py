@@ -4,6 +4,8 @@ from pathlib import Path
 
 ROLES = {'intake', 'spec-writer', 'builder', 'approver'}
 REVIEWERS = {'code', 'security', 'ux', 'ui'}
+RISKS = {'low', 'medium', 'high'}
+TRACKS = {'simple', 'complex'}
 
 
 class FactoryError(Exception):
@@ -12,10 +14,13 @@ class FactoryError(Exception):
 
 def load_config(root):
     config = json.loads((Path(root) / 'factory/config.json').read_text())
-    for key in ('concurrency', 'max_rounds', 'step_timeout_seconds', 'check_timeout_seconds'):
+    for key in ('concurrency', 'max_rounds', 'max_grill_rounds', 'step_timeout_seconds', 'check_timeout_seconds'):
         value = config.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise FactoryError(f'{key} must be a positive integer')
+    simple = config.get('simple_track_risks')
+    if not isinstance(simple, list) or not set(simple) <= RISKS or 'high' in simple:
+        raise FactoryError('simple_track_risks must list low and/or medium risk')
     profiles = config.get('profiles', {})
     if not profiles:
         raise FactoryError('configure at least one CLI profile')
@@ -37,7 +42,7 @@ def load_config(root):
         raise FactoryError('steps must define intake, spec-writer, builder, and approver')
     references = list(steps.values())
     routing = config.get('routing', {})
-    if set(routing) != {'low', 'medium', 'high'}:
+    if set(routing) != RISKS:
         raise FactoryError('routing must define low, medium, and high risk')
     for mapping in [*routing.values(), *config.get('surface_reviewers', {}).values()]:
         if not isinstance(mapping, dict) or not mapping or set(mapping) - REVIEWERS:

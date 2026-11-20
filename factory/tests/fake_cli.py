@@ -15,6 +15,7 @@ state_path = root / 'fake-github.json'
 
 if name == 'gh':
     state = json.loads(state_path.read_text()) if state_path.exists() else {'pr': None, 'merged': False, 'draft': True}
+    state.setdefault('comments', []); state.setdefault('label_edits', [])
     if args[:2] == ['auth', 'status']:
         print('test account authenticated')
     elif args[:2] == ['api', 'user']:
@@ -25,7 +26,13 @@ if name == 'gh':
         number = int(args[2])
         print(json.dumps({'number': number, 'title': 'Add numbers', 'body': 'Add two numbers.',
                           'author': {'login': 'factory-test'}, 'labels': [{'name': 'factory'}],
-                          'state': 'OPEN', 'url': f'https://example.test/issues/{number}', 'comments': []}))
+                          'state': 'OPEN', 'url': f'https://example.test/issues/{number}', 'comments': state['comments']}))
+    elif args[:2] == ['issue', 'comment']:
+        body = args[args.index('--body') + 1]
+        state['comments'].append({'author': {'login': 'factory-test'}, 'body': body,
+                                  'createdAt': f'2026-01-01T00:00:{len(state["comments"]):02d}Z'})
+    elif args[:2] == ['issue', 'edit']:
+        state['label_edits'].append(args[3:])
     elif args[:2] == ['pr', 'list']:
         print(json.dumps([{'number': 2, 'url': 'https://example.test/pull/2'}] if state['pr'] else []))
     elif args[:2] == ['pr', 'create']:
@@ -71,8 +78,12 @@ if os.environ.get('FACTORY_TEST_FAIL_ROLE') == role:
     raise SystemExit(0)
 
 artifact.parent.mkdir(parents=True, exist_ok=True)
-if role == 'intake':
-    body = 'DECISION: ACCEPT\nRISK: low\nSURFACES: ui, security\nRESCOPED: no\n\n## Summary\n- Add numbers.\n\n## Scope\nImplement addition.\n'
+grill_round = int(re.search(r'Grilling round: (\d+)', prompt).group(1))
+if role == 'intake' and os.environ.get('FACTORY_TEST_GRILL') and grill_round == 1:
+    body = ('DECISION: NEEDS-INFO\nRISK: low\nTRACK: complex\nSURFACES: none\nRESCOPED: no\n\n## Summary\n- Ask about overflow.\n\n'
+            '## Questions\n❓ **Q1** - **Overflow**: Should huge numbers be allowed?\n\n➡️ Yes, Python ints are unbounded.\n')
+elif role == 'intake':
+    body = 'DECISION: ACCEPT\nRISK: low\nTRACK: simple\nSURFACES: ui, security\nRESCOPED: no\n\n## Summary\n- Add numbers.\n\n## Scope\nImplement addition.\n'
 elif role == 'spec-writer':
     body = '# Addition\n\n## Summary\n- Add numbers.\n\n## Acceptance criteria\n1. add(1, 2) returns 3.\n'
 elif role == 'builder':

@@ -99,6 +99,9 @@ Adapt `factory/config.json`:
 - Retain factory internals in `protected_paths`; add other paths only when a
   job must never modify them. Existing project tests should generally remain
   editable. Patterns use fnmatch semantics, where `*` can also match `/`.
+- Set `max_grill_rounds` (question rounds intake may post on an issue) and
+  `simple_track_risks` (risks allowed on the simple track: `low`, optionally
+  `medium`, never `high`).
 - Set `concurrency`, `max_rounds`, `step_timeout_seconds`, and
   `check_timeout_seconds` to appropriate project limits. Start with concurrency
   1 when evaluating a new installation.
@@ -115,11 +118,24 @@ settings remain the operator's responsibility.
 Tailor `factory/prompts/` to the project without changing the required output
 filenames or first-line formats. In particular:
 
-- Intake: describe the project's purpose so it can judge what belongs.
+- Intake: describe the project's purpose so it can judge what belongs, and
+  what makes a change simple or complex in this project.
 - Security review: identify auth, payment, data-access, and input-handling areas.
 - UI and UX review: document users, design conventions, and how to run browser
   verification. The supplied prompts expect an installed `agent-browser` CLI.
 - Approver: state which changes need a human product or operational decision.
+
+Keep the intake header lines (`DECISION`, `RISK`, `TRACK`, `SURFACES`,
+`RESCOPED`) and the `## Questions` section: the runner validates the header,
+and the questions are what the factory posts on the issue.
+
+### Domain language
+
+The prompts read the project's domain glossary (`GLOSSARY.md`, or an existing
+`CONTEXT.md`; a `GLOSSARY-MAP.md` or `CONTEXT-MAP.md` for several contexts),
+its ADRs in `docs/adr/`, and `.out-of-scope/*.md` for rejected requests, when
+they exist. None is required: the builder creates the glossary and ADR folder
+when a spec first asks for an entry. Don't add them to `protected_paths`.
 
 The runner controls the CLI/model for each role. Shared prompts must not
 hardcode provider-specific spawning, stop hooks, or session resumption tools.
@@ -135,7 +151,8 @@ a supplied port. Add a concise factory section:
 ## Software factory
 
 Run `factory/bin/factory run` for open issues labeled `factory`, or add an issue
-number to run one. Claude's `/factory` and Codex's `$factory` invoke the same
+number to run one. Intake may grill the author on the issue first: answer its
+numbered questions in a comment and rerun. Claude's `/factory` and Codex's `$factory` invoke the same
 runner. Profiles in `factory/config.json` select the coding CLI/model per role.
 Project checks: `factory/checks.sh`. State and native CLI logs live in
 `factory/jobs/`; each job's checkout is `.worktrees/<job-id>`. Both directories
@@ -163,7 +180,7 @@ missing GitHub labels (preserve existing labels):
 
 ```bash
 gh label create factory --color 5319E7 --description "Build this with the software factory"
-gh label create factory:needs-info --color FBCA04 --description "The factory needs an answer on the issue"
+gh label create factory:needs-info --color FBCA04 --description "The factory is waiting for answers on the issue"
 gh label create factory:needs-human --color D93F0B --description "The factory needs a human decision"
 ```
 
@@ -191,7 +208,11 @@ hook entries after preserving their customizations; keep unrelated agents and
 hooks. Both skill entry points now delegate to the shared runner.
 
 Use the new profiles/steps/routing structure while retaining the target's base
-branch, checks, limits, and protected paths. Finish or inspect active jobs before
+branch, checks, limits, and protected paths. Add `max_grill_rounds` and
+`simple_track_risks` to an older config.json, and merge project customizations
+into the new intake, spec-writer, builder, reviewer-code and approver prompts.
+An accepted intake.md from before tracks has no `TRACK` line; let such jobs
+finish, since later roles then see `Track: not chosen yet`. Finish or inspect active jobs before
 upgrading. Historical example artifacts remain readable. For a legacy active
 job whose agents still contain model aliases, reroute an accepted intake job
 with `factory/bin/route <id>`; jobs already past intake need their previous

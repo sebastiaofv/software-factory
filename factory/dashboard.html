@@ -377,9 +377,14 @@ function tokenLabel(job) {
   return `${(usage.input_tokens + usage.output_tokens).toLocaleString()} tokens`
 }
 
+function describeProfile(profile) {
+  const label = `${profile.cli} / ${profile.model || 'CLI default'}`
+  return profile.reasoning_effort ? `${label} · ${profile.reasoning_effort}` : label
+}
+
 function profileLabel(name) {
   const profile = factoryConfig?.profiles?.[name]
-  return profile ? `${profile.cli} / ${profile.model || 'CLI default'}` : name || ''
+  return profile ? describeProfile(profile) : name || ''
 }
 
 function executionLabel(job) {
@@ -388,7 +393,7 @@ function executionLabel(job) {
   if (job.stage === 'review') return [...new Set(Object.values(job.agents?.reviewers || {}).map(profileLabel))].join(' · ')
   const runs = job.usage?.executions || []
   const execution = [...runs].reverse().find((r) => !role || r.role === role)
-  if (execution?.profile) return `${execution.profile.cli} / ${execution.profile.model || 'CLI default'}`
+  if (execution?.profile) return describeProfile(execution.profile)
   return role ? profileLabel(job.agents?.[role]) : ''
 }
 
@@ -407,11 +412,15 @@ function card(job, rounds) {
   const done = job.stage === 'merged' || job.stage === 'rejected'
   const [num, ...slug] = job.id.split('-')
   const flag = human ? '<span class="flag">your call</span>'
-    : job.stage === 'needs-info' ? '<span class="flag wait">asked author</span>'
+    : job.stage === 'needs-info' ? '<span class="flag wait">grilling author</span>'
     : job.stage === 'rejected' ? '<span class="flag wait">rejected</span>' : ''
   const risk = job.intake?.risk
+  const track = job.intake?.track
+  const grill = job.intake?.grill_round
   const meta = [
     risk ? `<span class="risk-${esc(risk)}">${esc(risk)}</span>` : '',
+    track ? `<span>${esc(track)} track</span>` : '',
+    grill > 1 || job.stage === 'needs-info' ? `<span>grilling round ${esc(grill)}</span>` : '',
     `<span>${costLabel(job)}</span>`,
     `<span>${elapsed(job)}</span>`,
     tokenLabel(job) ? `<span>${esc(tokenLabel(job))}</span>` : '',

@@ -34,8 +34,11 @@ For rejection, pass the user's reason on stdin to
 `factory/bin/job reject <job-or-issue>`; this posts the reason and closes its PR.
 Use a quoted heredoc or a file for multiline text.
 
-For an answer to a `needs-info` question, post the user's answer to its issue
-using `gh issue comment <issue> --body-file <file>`, then run that issue again.
+A `needs-info` job is grilling its author: the latest `intake.md` holds that
+round's numbered questions, each with a recommended answer. To answer for the
+user, post their answer verbatim to the issue using
+`gh issue comment <issue> --body-file <file>` (by question number, or "go with
+your recommendations"), then run that issue again.
 Create and label a new issue only when the user asks you to file or build it.
 
 ## Scope

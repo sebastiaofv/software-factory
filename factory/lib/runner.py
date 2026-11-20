@@ -98,10 +98,15 @@ class Runner:
         number = int(job['id'].split('-')[0])
         offset = {'reviewer-ux': 1, 'reviewer-ui': 2}.get(role, 0)
         port = self.config['ports']['base'] + self.config['ports']['step'] * number + offset
+        track = (job.get('intake') or {}).get('track') or 'not chosen yet'
+        grill = self.grill_round(job)
+        questions = 'yes' if grill <= self.config['max_grill_rounds'] else 'no'
         return (
             f'Job: {job["id"]}. Job folder: {folder}/. Main checkout: {self.root}. '
             f'Worktree: {worktree}. Branch: {job["branch"]}. Base: origin/{self.config["base_branch"]}. '
             f'Issue: #{job["issue"]}. Round: {job["round"]}. PR: {job.get("pr")}. Port: {port}.\n'
+            f'Track: {track}. Grilling round: {grill} of at most {self.config["max_grill_rounds"]}. '
+            f'Questions allowed: {questions}.\n'
             f'Role: {role}. Required output: {artifact}\n\n'
             'Execute only this role. The Python runner owns scheduling, state transitions, commits, '
             'pushes, PR creation, labels, and merging. Do not invoke factory skills or job commands, '
@@ -113,6 +118,10 @@ class Runner:
             'If a required tool or permission is unavailable, report the blocker; never claim verification you did not perform.\n\n'
             + (self.root / 'factory/prompts' / f'{role}.md').read_text()
         )
+
+    def grill_round(self, job):
+        """Intake's current grilling round: one more than the question rounds already answered."""
+        return len(list((self.jobs / job['id']).glob('intake-*.md'))) + 1
 
     def validate_artifact(self, job, role, path):
         if not path.is_file() or not path.read_text().strip():
@@ -133,6 +142,13 @@ class Runner:
             fields = dict(line.split(': ', 1) for line in text.split('\n\n', 1)[0].splitlines() if ': ' in line)
             if fields.get('RISK') not in self.config['routing'] or fields.get('RESCOPED') not in {'yes', 'no'}:
                 raise FactoryError('intake returned invalid risk or rescoping fields')
+            if fields.get('TRACK') not in {'simple', 'complex'}:
+                raise FactoryError('intake returned an invalid track')
+            if fields['TRACK'] == 'simple' and fields['RISK'] not in self.config['simple_track_risks']:
+                raise FactoryError(f'intake put {fields["RISK"]}-risk work on the simple track; simple_track_risks forbids it')
+            if first == 'DECISION: NEEDS-INFO' and self.grill_round(job) > self.config['max_grill_rounds']:
+                raise FactoryError(f'intake asked again after {self.config["max_grill_rounds"]} grilling rounds; '
+                                   'it must accept with its recommended answers or reject')
             surfaces = {v.strip() for v in fields.get('SURFACES', '').split(',')}
             if not surfaces or not surfaces <= {'none', *self.config['surface_reviewers']} or ('none' in surfaces and len(surfaces) > 1):
                 raise FactoryError('intake returned invalid surfaces')

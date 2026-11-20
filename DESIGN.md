@@ -35,6 +35,47 @@ Reviewers run in parallel once the gate passes. The approver escalates sensitive
 changes using the project-specific rules in its prompt. An approval triggers
 base-branch synchronization, another gate, a push, and GitHub's merge command.
 
+## Workflow
+
+The role prompts adapt Matt Pocock's engineering skills to an unattended,
+issue-driven pipeline:
+
+| Stage | Practices |
+|---|---|
+| intake | grilling in rounds (design tree, frontier, recommended answers), triage's already-built and `.out-of-scope/` checks, settling domain terms |
+| spec-writer | agent brief (simple) or design spec (complex): deep modules, test seams, vertical slices, prefactor, glossary and ADR changes |
+| builder | test-first vertical slices at the spec's seams; for bugs, a red feedback loop, then a regression test, then the fix |
+| reviewer-code | separate Spec and Standards axes, test quality, module depth, glossary terms, code-smell baseline as judgement calls |
+| approver | spec and test-first evidence, merge danger (one-way or two-way door, blast radius), follow-ups |
+
+Interactive steps become files and issue comments. Only the builder edits
+source, so glossary (`GLOSSARY.md`, or an existing `CONTEXT.md`) and ADR
+updates are spec requirements the builder carries out. Architecture surveys are
+not a stage: complex specs may require an in-scope prefactor, and out-of-scope
+deepening opportunities are reported as follow-ups without opening issues.
+
+### Tracks
+
+intake.md carries `TRACK: simple | complex`. The runner passes the track to
+every later role, whose prompt has the matching instructions; the stage graph,
+gate and reviewer routing are the same for both. `simple_track_risks` (default
+`["low"]`; `high` is never allowed) lists the risks that may take the simple
+track, and the runner refuses an intake that puts other work there. The track
+is recorded in job.json's `intake` field.
+
+### Grilling on the issue
+
+A NEEDS-INFO intake is one grilling round. `job advance <id> needs-info` posts
+everything below intake.md's header as `### Factory grilling: round k` with a
+fixed footer on how to answer, and adds the needs-info label. `job queue`
+reports the job as waiting until the issue's author or the operator comments
+after the factory's last comment. The next run moves it back to intake, which
+archives intake.md as `intake-k.md`, refreshes issue.md with the answers, and
+runs intake again. Each prompt states the grilling round and whether questions
+are still allowed; after `max_grill_rounds` question rounds, the runner refuses
+another NEEDS-INFO, so intake must accept with its recommended answers or
+reject. job.json's `intake.grill_round` is derived from the archived rounds.
+
 ## Configuration
 
 Profiles contain `cli`, optional `model`, and optional `reasoning_effort`.
@@ -46,7 +87,8 @@ Unsupported CLIs or profile references fail configuration validation.
 Routing snapshots profile names into the accepted job. Profile settings are
 resolved at execution time and recorded with each attempt. Editing a profile
 changes future attempts; completed-stage reuse requires an exact profile match.
-`step_timeout_seconds` bounds coding CLI calls and `check_timeout_seconds`
+`max_grill_rounds` bounds intake's question rounds, and `simple_track_risks`
+bounds the simple track. `step_timeout_seconds` bounds coding CLI calls and `check_timeout_seconds`
 bounds project checks. Runner commands receive another 30 seconds for startup,
 cleanup, and writing failure reports.
 
@@ -117,7 +159,8 @@ usage does not prevent a job from advancing.
 
 `python3 -m unittest discover -s factory/tests -v` exercises the real scripts
 against temporary Git repositories, a local bare origin, and fake coding/GitHub
-CLIs. It covers mixed-provider routing, failed checks, requested review changes,
+CLIs. It covers mixed-provider routing, grilling on the issue and resuming with
+the answers, track and grilling-round limits, failed checks, requested review changes,
 merging, restart after CLI failure, subscription-login rejection, CLI/check
 timeouts, signal cancellation, stale artifacts and source changes,
 configuration validation, duplicate creation, and scheduler locking. It makes

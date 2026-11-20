@@ -30,11 +30,12 @@ separate: `python3 -m unittest discover -s factory/tests -v`.
 ```mermaid
 flowchart TD
     Issue["GitHub issue labeled factory"] --> Intake{"Intake · configured CLI / model"}
-    Intake -->|NEEDS-INFO| Question["Ask the author on the issue"]
-    Question -->|Author replies and run resumes| Intake
+    Intake -->|NEEDS-INFO| Question["Post a grilling round on the issue"]
+    Question -->|Author answers and run resumes| Intake
     Intake -->|REJECT| Rejected["Explain why and remove the label"]
     Intake -->|ACCEPT| Route["Route reviewers by risk and surfaces"]
-    Route --> Spec["Spec writer · configured CLI / model"]
+    Route -->|simple track| Spec["Spec writer · configured CLI / model"]
+    Route -->|complex track| Spec
     Spec --> Build["Builder · configured CLI / model"]
     Build --> Publish["Runner commits, pushes, and opens a draft PR"]
     Publish --> Gate{"Gate · project checks"}
@@ -47,6 +48,25 @@ flowchart TD
     Sync -->|Conflict or failure| Human["Human review · factory:needs-human"]
     Approver -->|ESCALATE| Human
 ```
+
+The workflow borrows from [Matt Pocock's skills](https://github.com/mattpocock/skills):
+intake **grills** the author on the issue before anything is built, the domain
+glossary and ADRs keep the project's language consistent, the builder works
+**test-first** in vertical slices, the code reviewer checks the Spec and
+Standards axes separately, and specs design **deep modules** behind few seams.
+
+Intake puts each accepted job on one of two tracks. The **simple** track (by
+default only low-risk work) gets a short brief and light grilling. The
+**complex** track gets grilled until every open decision is settled, and its
+spec designs the modules, test seams, slices, glossary and ADR changes before
+the builder starts. Both tracks share the same stages and reviewers.
+
+Grilling happens on the GitHub issue. Each round is one comment, `Factory
+grilling: round k`, with numbered questions and a recommended answer for each.
+Answer in a comment, by number or with "go with your recommendations", then
+rerun the factory: it rereads the issue and continues. After
+`max_grill_rounds` rounds, intake must accept with its recommended answers or
+reject.
 
 Failed checks and requested changes return to the builder up to `max_rounds`;
 after that, the job goes to a human. A blocked builder also escalates.
@@ -79,11 +99,14 @@ reason on stdin. You can also approve an escalated PR by merging it on GitHub.
 `factory/config.json` defines named profiles. Each profile selects `claude` or
 `codex`, an optional model, and optional `reasoning_effort`. A null model or
 effort uses that CLI's current default. Choose models available to your account.
+Claude profiles accept `low`, `medium`, `high`, `xhigh`, or `max` (passed as
+`claude --effort`); Codex profiles accept `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, `max`, or `ultra` (passed as `model_reasoning_effort`).
 
 ```json
 {
   "profiles": {
-    "claude-strong": { "cli": "claude", "model": "opus" },
+    "claude-strong": { "cli": "claude", "model": "opus", "reasoning_effort": "high" },
     "codex": { "cli": "codex", "model": null, "reasoning_effort": null }
   },
   "steps": {
