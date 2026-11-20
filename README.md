@@ -83,9 +83,18 @@ Label an open issue `factory`, then run from the repository root:
 factory/bin/factory doctor       # configuration, logins, and installation
 factory/bin/factory run          # drain the queue; also resume interrupted jobs
 factory/bin/factory run 12       # one issue
+factory/bin/factory run --watch  # keep running: pick up replies, feedback, new issues
 factory/bin/factory status       # local jobs and usage
 factory/bin/factory trace 12     # every step of issue 12: time, tokens, verdict
 ```
+
+`run --watch` (optionally with an issue number and `--interval <seconds>`,
+default 60) does not exit when every job waits on a person. It rechecks GitHub
+and starts jobs as authors answer grilling questions, as you give feedback with
+`job feedback`, or as issues are labeled, while other jobs keep running. A job
+that fails is reported and skipped until you restart the watcher. With an issue
+number it exits once that issue is merged, rejected, or closed. Stop it with
+Ctrl-C.
 
 In Claude Code, use `/factory run` or `/factory run 12`. In Codex, invoke the
 factory skill with `$factory` and ask it to run the queue or issue 12. Both

@@ -8,6 +8,7 @@ import time
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -147,6 +148,85 @@ class FactoryTests(unittest.TestCase):
         self.assertIn('Track: simple.', prompts['builder'][0])
         accepted = [c['body'] for c in self.github()['comments'] if 'Factory intake: ACCEPT' in c['body']]
         self.assertIn('(simple track, risk low', accepted[0])
+
+    def watch(self, issue=None):
+        """Start a watching runner in a thread; returns (thread, stop event, errors)."""
+        stop, errors = threading.Event(), []
+        def target():
+            try:
+                self.runner.run(issue, watch=True, interval=.05, stop=stop)
+            except Exception as exc:
+                errors.append(exc)
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (stop.set(), thread.join(30)))
+        return thread, stop, errors
+
+    def wait_for(self, condition, timeout=60):
+        deadline = time.monotonic() + timeout
+        while not condition():
+            self.assertLess(time.monotonic(), deadline, 'timed out waiting')
+            time.sleep(.05)
+
+    def stage(self, job_id='001-add-numbers'):
+        path = self.repo / 'factory/jobs' / job_id / 'job.json'
+        return json.loads(path.read_text())['stage'] if path.exists() else None
+
+    def test_watch_resumes_after_the_author_answers_then_exits_when_merged(self):
+        with patch.dict(os.environ, {'FACTORY_TEST_GRILL': '1'}):
+            thread, _, errors = self.watch(1)
+            self.wait_for(lambda: self.stage() == 'needs-info')
+            time.sleep(.3)  # several polls while waiting: the watcher stays up and does not rerun intake
+            self.assertTrue(thread.is_alive())
+            calls = (self.base / 'invocations.jsonl').read_text().splitlines()
+            self.assertEqual(len(calls), 1)
+            state = self.github()
+            state['comments'].append({'author': {'login': 'factory-test'}, 'body': 'go with your recommendations',
+                                      'createdAt': '2026-01-02T00:00:00Z'})
+            (self.base / 'fake-github.json').write_text(json.dumps(state))
+            thread.join(60)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(self.stage(), 'merged')
+
+    def test_watch_keeps_running_after_a_job_fails_and_does_not_retry_it(self):
+        with patch.dict(os.environ, {'FACTORY_TEST_FAIL_ROLE': 'spec-writer'}):
+            thread, stop, errors = self.watch()
+            spec_runs = lambda: [json.loads(l)['role'] for l in
+                                 (self.base / 'invocations.jsonl').read_text().splitlines()].count('spec-writer') \
+                if (self.base / 'invocations.jsonl').exists() else 0
+            self.wait_for(lambda: spec_runs() == 1 and self.stage() == 'spec')
+            time.sleep(.5)
+            self.assertTrue(thread.is_alive())
+            self.assertEqual(spec_runs(), 1)
+            stop.set()
+            thread.join(30)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_watch_starts_ready_jobs_while_another_is_still_running(self):
+        queue = [('resume', '1', '001-a', 'build', 'round 1')]
+        release, started = threading.Event(), []
+        def job_command(*args):
+            if args[0] == 'queue':
+                return '\n'.join('\t'.join(row) for row in queue)
+            return ''
+        def run_job(job_id):
+            started.append(job_id)
+            if job_id == '001-a':
+                release.wait(30)
+            return 'merged'
+        with patch.object(self.runner, 'doctor'), patch.object(self.runner, 'job_command', job_command), \
+                patch.object(self.runner, 'run_job', run_job):
+            thread, stop, errors = self.watch()
+            self.wait_for(lambda: started == ['001-a'])
+            queue.append(('resume', '2', '002-b', 'build', 'author replied'))
+            self.wait_for(lambda: '002-b' in started)
+            self.assertEqual(started.count('001-a'), 1)  # an in-flight job is not started twice
+            release.set()
+            stop.set()
+            thread.join(30)
+        self.assertEqual(errors, [])
 
     def test_intake_track_and_grilling_limits_are_enforced(self):
         job_id = self.runner.job_command('create', '1')

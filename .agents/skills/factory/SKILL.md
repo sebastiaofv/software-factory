@@ -14,12 +14,18 @@ from `factory/config.json`.
 
 - Run the queue: `factory/bin/factory run`.
 - Run one labeled issue: `factory/bin/factory run <issue-number>`.
+- Keep running and pick up replies, feedback, and new issues as they arrive:
+  `factory/bin/factory run --watch` (or `run <issue> --watch`; `--interval <seconds>`, default 60).
 - Check installation and subscription logins: `factory/bin/factory doctor`.
 - Show jobs and usage: `factory/bin/factory status`.
 - Show where a job's time and tokens went, step by step: `factory/bin/factory trace <issue>`.
 
 Execute the requested command and report its result. Keep the runner attached to
 an active terminal session until it exits, communicating meaningful progress.
+A `--watch` runner never exits on its own unless it watches one issue: start it
+in the background or a terminal the user can see, report what it starts and what
+waits on whom, and stop it only when the user asks. While it runs, `job feedback`
+and issue replies are picked up without rerunning; do not start a second runner.
 On a failure, report the cause and log directory. Resume by rerunning the same
 command after fixing the cause. The runner reuses validated stage artifacts.
 Do not bypass a refused transition or independently spawn factory agents.

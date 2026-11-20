@@ -1,6 +1,6 @@
 """Own the workflow; coding CLIs execute bounded roles and produce artifacts."""
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -10,6 +10,7 @@ import json
 import signal
 from pathlib import Path
 import subprocess
+import threading
 import time
 import uuid
 
@@ -311,52 +312,104 @@ class Runner:
                 raise FactoryError(f'unknown stage {stage}')
             print(f'{job_id}: {stage} → {self.job(job_id)["stage"]}', flush=True)
 
-    def run(self, issue=None):
-        adapters._cancelled.clear()
-        self.doctor()
-        failed = set()
-        touched = set()
-        with runner_lock(self.root):
-            while True:
-                rows = [line.split('\t', 4) for line in self.job_command('queue').splitlines() if line]
-                if issue is not None:
-                    rows = [row for row in rows if row[1] == str(issue)]
-                    if not rows:
-                        raise FactoryError(f'issue #{issue} is not an open factory-labeled issue')
-                selected = []
-                for action, number, job_id, stage, note in rows:
-                    if number in failed or action not in {'new', 'resume'}:
-                        continue
-                    if action == 'new':
-                        job_id = self.job_command('create', number)
-                    elif stage == 'needs-info':
-                        self.job_command('advance', job_id, 'intake')
-                    selected.append((number, job_id))
-                if not selected:
-                    break
-                with ThreadPoolExecutor(max_workers=self.config['concurrency']) as pool:
-                    futures = {pool.submit(self.run_job, job_id): (number, job_id) for number, job_id in selected}
-                    for future in as_completed(futures):
-                        number, job_id = futures[future]
-                        touched.add(job_id)
-                        try:
-                            future.result()
-                        except Exception as exc:
-                            failed.add(number)
-                            print(f'{job_id}: stopped: {exc}', flush=True)
-                if issue is not None:
-                    break
-            if touched:
-                print(self.job_command('summary', *sorted(touched)))
-        if failed:
-            raise FactoryError('some jobs stopped; fix the reported cause and rerun to resume')
+    def poll(self, issue, failed, inflight, watch):
+        """Queue rows to start now, plus the rows waiting on a person or a slot."""
+        rows = [line.split('\t', 4) for line in self.job_command('queue').splitlines() if line]
+        if issue is not None:
+            rows = [row for row in rows if row[1] == str(issue)]
+        busy = {number for number, _ in inflight.values()}
+        selected, waiting = [], []
+        for action, number, job_id, stage, note in rows:
+            if number in failed or number in busy:
+                continue
+            if action not in {'new', 'resume'}:
+                waiting.append((action, number, job_id, stage, note))
+                continue
+            if action == 'new':
+                job_id = self.job_command('create', number)
+            elif stage == 'needs-info':
+                self.job_command('advance', job_id, 'intake')
+            if watch:
+                print(f'#{number}: starting {job_id} ({note})', flush=True)
+            selected.append((number, job_id))
+        return rows, selected, waiting
 
+    def run(self, issue=None, watch=False, interval=60, stop=None):
+        """Drain the queue, or with watch keep polling it until stopped.
+
+        Watching never exits on an empty queue: it rechecks GitHub every
+        interval seconds and starts jobs whose author replied, whose operator
+        gave feedback, or that are newly labeled, while other jobs still run.
+        A job that fails is reported and skipped until the runner restarts.
+        """
+        adapters._cancelled.clear()
+        stop = stop or threading.Event()
+        self.doctor()
+        failed, touched, inflight = set(), set(), {}
+        shown = None
+        seen = False
+        if watch:
+            print(f'factory: watching the queue every {interval:g}s; Ctrl-C to stop', flush=True)
+        with runner_lock(self.root), ThreadPoolExecutor(max_workers=self.config['concurrency']) as pool:
+            while not stop.is_set():
+                if watch or not inflight:
+                    try:
+                        rows, selected, waiting = self.poll(issue, failed, inflight, watch)
+                    except FactoryError as exc:
+                        if not watch:
+                            raise
+                        print(f'factory: queue check failed, retrying in {interval:g}s: {exc}', flush=True)
+                        stop.wait(interval)
+                        continue
+                    if issue is not None:
+                        if rows:
+                            seen = True
+                        elif not seen:
+                            raise FactoryError(f'issue #{issue} is not an open factory-labeled issue')
+                    for number, job_id in selected:
+                        inflight[pool.submit(self.run_job, job_id)] = (number, job_id)
+                    if watch and set(waiting) != shown:
+                        shown = set(waiting)
+                        for action, number, job_id, stage, note in waiting:
+                            if action != 'skip':
+                                print(f'#{number}: {action}: {note}', flush=True)
+                    if not inflight:
+                        if not watch:
+                            break
+                        if issue is not None and (str(issue) in failed or not rows
+                                                  or all(row[0] == 'skip' for row in rows)):
+                            break  # the watched issue is done, rejected, closed, or failed
+                if inflight:
+                    done, _ = wait(inflight, timeout=interval if watch else None, return_when=FIRST_COMPLETED)
+                else:
+                    done = set()
+                    stop.wait(interval)
+                for future in done:
+                    number, job_id = inflight.pop(future)
+                    touched.add(job_id)
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        failed.add(number)
+                        print(f'{job_id}: stopped: {exc}' + (' (skipped until the runner restarts)' if watch else ''), flush=True)
+                    else:
+                        if watch:
+                            print(self.job_command('summary', job_id), flush=True)
+                if issue is not None and not watch and not inflight:
+                    break
+            if touched and not watch:
+                print(self.job_command('summary', *sorted(touched)))
+        if failed and (not watch or issue is not None):
+            raise FactoryError('some jobs stopped; fix the reported cause and rerun to resume')
 
 def main(root, argv=None):
     parser = argparse.ArgumentParser(description='Run the software factory through subscription-authenticated coding CLIs.')
     sub = parser.add_subparsers(dest='command', required=True)
     run = sub.add_parser('run', help='drain the labeled issue queue, or run one issue')
     run.add_argument('issue', nargs='?', type=int)
+    run.add_argument('--watch', action='store_true',
+                     help='keep running: poll for replies, feedback, and new issues instead of exiting when jobs wait')
+    run.add_argument('--interval', type=float, default=60, help='seconds between queue checks with --watch (default 60)')
     sub.add_parser('doctor', help='check configuration, subscription logins, and installation')
     sub.add_parser('status', help='show local jobs and usage')
     trace = sub.add_parser('trace', help="show each run of a job with its time and tokens")
@@ -372,7 +425,9 @@ def main(root, argv=None):
     try:
         runner = Runner(root)
         if args.command == 'run':
-            runner.run(args.issue)
+            if args.interval <= 0:
+                raise FactoryError('--interval must be positive')
+            runner.run(args.issue, watch=args.watch, interval=args.interval)
         elif args.command == 'doctor':
             runner.doctor()
         elif args.command == 'trace':

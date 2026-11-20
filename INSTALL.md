@@ -151,7 +151,8 @@ a supplied port. Add a concise factory section:
 
 Run `factory/bin/factory run` for open issues labeled `factory`, or add an issue
 number to run one. Intake may grill the author on the issue first: answer its
-numbered questions in a comment and rerun. Claude's `/factory` and Codex's `$factory` invoke the same
+numbered questions in a comment and rerun, or keep `factory/bin/factory run --watch`
+running so replies, feedback, and newly labeled issues are picked up as they arrive. Claude's `/factory` and Codex's `$factory` invoke the same
 runner. Profiles in `factory/config.json` select the coding CLI/model per role.
 Project checks: `factory/checks.sh`. State and native CLI logs live in
 `factory/jobs/`; each job's checkout is `.worktrees/<job-id>`. Both directories
