@@ -197,6 +197,11 @@ gh label create factory:needs-human --color D93F0B --description "The factory ne
 5. `git check-ignore factory/jobs/x .worktrees/x` prints both paths. All copied
    implementation and skill files remain committable.
 
+Job receipts upgrade in place: runs recorded before tracing have no
+`duration_seconds` or `uncached_input_tokens`, so the trace derives them from
+timestamps and from input minus cached input, and jobs created earlier have no
+stage `history`.
+
 ## 5. Upgrade an existing installation
 
 The older Claude-only factory used `.claude/agents/*.md`, a Claude-specific stop
@@ -209,7 +214,8 @@ hooks. Both skill entry points now delegate to the shared runner.
 Use the new profiles/steps/routing structure while retaining the target's base
 branch, checks, limits, and protected paths. Add `max_grill_rounds` and
 `simple_track_risks` to an older config.json, and merge project customizations
-into the new intake, spec-writer, builder, reviewer-code and approver prompts.
+into the new intake, spec-writer, builder, reviewer-code, reviewer-ui and
+approver prompts.
 An accepted intake.md from before tracks has no `TRACK` line; let such jobs
 finish, since later roles then see `Track: not chosen yet`. Finish or inspect active jobs before
 upgrading. Historical example artifacts remain readable. For a legacy active
@@ -235,4 +241,6 @@ unless the user requested them. Each run can publish and merge real PRs.
 Ask the user to label a small issue `factory`, run it, and inspect its PR and
 local dashboard. Explain how to choose CLI profiles and where failures and
 usage receipts appear: `factory/bin/factory trace <issue>` and the dashboard's
-trace view list every step's time and tokens. Subscription limits and extra-usage settings still apply.
+trace view list every step's time and tokens, and README.md's "Tracing and
+debugging a job" explains the run folders. Subscription limits and extra-usage
+settings still apply.

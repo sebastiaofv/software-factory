@@ -71,7 +71,9 @@ reject.
 Failed checks and requested changes return to the builder up to `max_rounds`;
 after that, the job goes to a human. A blocked builder also escalates.
 The runner runs up to `concurrency` jobs at once. Reviewers within each job run
-in parallel. Each job gets its own `.worktrees/<job-id>` checkout.
+in parallel: a code reviewer always, a UI reviewer (UX and visual design, in one
+browser session) for `ui` changes, and a security reviewer for `security`
+changes. Each job gets its own `.worktrees/<job-id>` checkout.
 
 ## Commands
 
@@ -133,8 +135,8 @@ Claude profiles accept `low`, `medium`, `high`, `xhigh`, or `max` (passed as
 This is the profile and routing portion of the shipped `factory/config.json`
 (which also defines `codex-fast`, `codex-balanced` and `codex-strong`); retain
 the other settings. The `ui` surface adds one reviewer that judges both the
-flow (UX) and the visual design in a single browser session. For a single subscription, point every step and reviewer at a profile
-using that CLI. Another CLI requires an adapter that implements authentication,
+flow (UX) and the visual design in a single browser session. For a single
+subscription, point every step and reviewer at a profile using that CLI. Another CLI requires an adapter that implements authentication,
 command construction, and result parsing in `factory/lib/adapters.py`.
 
 ## Dashboard
@@ -144,7 +146,8 @@ python3 -m http.server --bind 127.0.0.1 --directory factory 8000
 ```
 
 Open <http://localhost:8000/dashboard.html>. Inspect each job's stages, routed
-profiles, usage, check results, and review documents. To view the included
+profiles, usage, check results, and review documents. Cards show tokens as
+uncached input, cached input and output; a job's drawer has its full trace. To view the included
 historical examples, copy `examples/jobs/` to `factory/jobs/` in a fresh checkout.
 
 The runner stores native CLI output, prompts, and execution receipts under
@@ -154,24 +157,79 @@ in the supported JSON event stream, so mixed runs show an unavailable estimate
 instead of treating missing cost as zero. Historical examples retain their
 recorded estimates.
 
-### Tracing a job
+## Tracing and debugging a job
 
-Every CLI step and every gate run leaves a receipt in `factory/jobs/<id>/runs/<run>/`
-(`result.json`, plus `prompt.txt`, `stdout.jsonl` and `stderr.log` for CLI steps).
-job.json collects them into `usage.executions` (one row per run: role, round,
-profile, models, verdict or error, start, end, duration, tokens, session id, run
-folder), `usage.by_role` (runs, seconds and tokens per role), and `history`
-(every stage transition with its time).
+Every step leaves a record, so you can see later where a job's time and tokens
+went and why it stopped.
+
+### What is recorded
+
+| Where | What |
+|---|---|
+| `factory/jobs/<id>/runs/<run>/result.json` | One receipt per CLI step and per gate run: role, round, stage, profile, models, commit, status, verdict or error, start, end, `duration_seconds`, tokens, session id. Gate receipts (`kind: check`) also hold the exit code and protected-path changes. |
+| `runs/<run>/prompt.txt` | The exact prompt the CLI received. |
+| `runs/<run>/stdout.jsonl` | The CLI's native output: Claude's JSON result or Codex's JSONL events, with native usage fields. |
+| `runs/<run>/stderr.log` | The CLI's error output. |
+| `job.json` → `usage.executions` | Every receipt as one row, in start order, with the run folder name. |
+| `job.json` → `usage.by_role` | Runs, seconds and tokens per role (`intake`, `builder`, `gate`, `reviewer-code`, ...). |
+| `job.json` → `usage.tokens` | Token totals for the job. |
+| `job.json` → `history` | Every stage transition with its time and round, including time spent waiting on the author (`needs-info`) or on you (`needs-human`). |
+
+Runs whose receipt says `running` were interrupted; they stay visible. A step
+reused from an earlier run (same role, round, commit, profile and source) starts
+no CLI and adds no row.
+
+### Reading it
 
 ```bash
-factory/bin/factory trace 12           # table of runs, totals by role, time in each stage
-factory/bin/factory trace 12 --json    # the same, for scripts
+factory/bin/factory trace 12           # runs, totals by role, time in each stage
+factory/bin/factory trace 12 --json    # the same data, for scripts
 ```
 
-The dashboard's job drawer has the same view under **trace: time & tokens**.
-Input tokens are split into **uncached** (not read from the provider's prompt
-cache, including cache writes) and **cached** reads, which providers count
-much more cheaply. Missing usage shows as `-`, never as zero.
+`trace` takes an issue number or a job id. Its table has one row per run (numbers
+illustrative):
+
+```text
+started              round  step           profile          status     verdict  time    uncached in  cached in  out    run
+2026-11-20 09:12:03  0      intake         claude/haiku     completed  ACCEPT   41s     18,204       96,512     1,830  20261120T091203...-intake-1a2b3c
+2026-11-20 09:12:44  1      builder        claude/opus      completed  READY    7m12s   64,920       1,402,118  21,407 ...
+2026-11-20 09:19:58  1      gate           -                completed  FAIL     1m03s   -            -          -      ...
+```
+
+The dashboard's job drawer shows the same view under **trace: time & tokens**;
+hover a row for its run folder or error. While a job runs, the runner also
+prints one line after each step: `001-add-numbers: builder completed in 412s,
+64,920 uncached in, 1,402,118 cached in, 21,407 out`.
+
+### Token columns
+
+- **uncached in**: prompt tokens not read from the provider's cache. For
+  Claude this is input plus cache writes; for Codex, input minus cached input.
+  This is the part that grows a session's cost fastest.
+- **cached in**: prompt tokens read from cache. Each turn of a session resends
+  its context, so this is usually the largest number, but providers count it
+  far more cheaply.
+- **out**: generated tokens, including reasoning where the CLI reports it.
+
+Usage a CLI didn't report shows as `-` or "tokens unavailable", never as zero.
+Gate rows have no tokens: they run `checks.sh`, not a model.
+
+### Debugging a slow, expensive or failed job
+
+1. Run `factory/bin/factory trace <issue>` and look at **By role** for the
+   role with the most time or uncached input, and at **Stages** for where the
+   job waited.
+2. Find the run in the table and open `factory/jobs/<id>/runs/<run>/`.
+   `prompt.txt` shows what the step was told; `stdout.jsonl` shows what it did,
+   turn by turn; `result.json` has the error for a failed step.
+3. For a failed gate, read `round-<N>/checks.md` and `checks.log`
+   (`merge-checks.*` for the gate before merging).
+4. Repeated builder rounds usually mean the gate or a reviewer keeps failing:
+   compare that round's `checks.md` or `review-*.md` with the next `build.md`.
+
+The `session_id` in each row is the CLI's own session, useful when reporting a
+problem with that CLI. The factory never resumes it.
+
 
 ## What's in here
 

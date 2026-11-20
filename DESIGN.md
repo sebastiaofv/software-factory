@@ -46,6 +46,7 @@ issue-driven pipeline:
 | spec-writer | agent brief (simple) or design spec (complex): deep modules, test seams, vertical slices, prefactor, glossary and ADR changes |
 | builder | test-first vertical slices at the spec's seams; for bugs, a red feedback loop, then a regression test, then the fix |
 | reviewer-code | separate Spec and Standards axes, test quality, module depth, glossary terms, code-smell baseline as judgement calls |
+| reviewer-ui | one browser session for both UX (flow, states, accessibility, mobile) and visual design (theme, spacing, consistency) |
 | approver | spec and test-first evidence, merge danger (one-way or two-way door, blast radius), follow-ups |
 
 Interactive steps become files and issue comments. Only the builder edits
@@ -81,7 +82,8 @@ reject. job.json's `intake.grill_round` is derived from the archived rounds.
 Profiles contain `cli`, optional `model`, and optional `reasoning_effort`.
 `steps` selects profiles for intake, spec-writer, builder, and approver.
 `routing` supplies reviewers by risk; `surface_reviewers` adds UI or security
-reviewers. The UI reviewer covers both UX and visual design in one browser session. All selected roles resolve through the same profile mechanism.
+reviewers. The UI reviewer covers both UX and visual design in one browser
+session. All selected roles resolve through the same profile mechanism.
 Unsupported CLIs or profile references fail configuration validation.
 
 Routing snapshots profile names into the accepted job. Profile settings are
@@ -130,7 +132,8 @@ project information; keep job directories local.
   scheduled jobs can finish. Failed jobs are not retried endlessly within a run;
   rerun after fixing the reported cause.
 - Fresh CLI sessions recover from files. Raw logs and receipts live in
-  `factory/jobs/<id>/runs/<attempt>/`. Interrupted running receipts remain visible.
+  `factory/jobs/<id>/runs/<attempt>/`. Interrupted running receipts remain
+  visible in the trace with status `running`.
 
 GitHub actions and local state writes are not a distributed transaction. A crash
 between a transition's external effects and its save can still require manual
@@ -140,25 +143,55 @@ Changing or removing a queue label does not cancel an already executing model.
 Full idempotent transition reconciliation and isolated execution containers are
 future work.
 
-## Usage
+## Usage and tracing
 
 Each adapter reads only its invocation's documented output format: Claude's
-JSON result or Codex's JSONL events. Receipts record CLI, requested profile,
-reported models when available, normalized token usage, session ID, and timestamps.
-No scan of private CLI transcript directories is required.
+JSON result or Codex's JSONL events. No scan of private CLI transcript
+directories is required.
 
-Input-token totals include cached reads and cache writes for both adapters;
-`uncached_input_tokens` is the part not read from cache (Claude's input plus
-cache writes, Codex's input minus cached input). Native fields remain available
-in each invocation log. The gate writes a `kind: check` receipt with its
-duration and verdict, so check time sits beside model time. job.json aggregates
-receipts into `usage.executions` (one row per run, ordered by start),
-`usage.by_role`, and token totals, and `job advance` appends each transition to
-`history`. `factory trace <job>` prints them.
-A dollar estimate is shown only when every attempt reports one. Partial cost
+### Receipts
+
+Every CLI attempt writes `runs/<attempt>/result.json` with `kind: cli`, the
+role, round, stage, profile name and settings, commit, status, start and end
+times, `duration_seconds` (monotonic), reported models, normalized token usage,
+session ID, any API-equivalent estimate, and on success the verdict (the
+artifact's first line; `SPEC` for the spec writer) and the source and artifact
+checksums. A failed attempt records its error. The gate writes a `kind: check`
+receipt for each run, including the one before merging (role `merge-gate`),
+with its duration, verdict, exit code, protected-path changes and report path,
+so check time sits beside model time. Prompts and native output sit in the same
+folder.
+
+### Normalized tokens
+
+`input_tokens` counts every prompt token, including cached reads and cache
+writes, for both adapters. `uncached_input_tokens` is the part not read from
+cache: Claude's input plus cache writes, Codex's input minus cached input.
+`cached_input_tokens` and `output_tokens` complete the split; Claude also
+reports `cache_write_input_tokens`. Native fields remain in each invocation log.
+
+### Aggregation
+
+`job sync` rebuilds job.json's usage from the receipts on every step:
+
+- `usage.executions`: one row per receipt, ordered by start, with the run
+  folder, verdict or error, duration and tokens;
+- `usage.by_role`: runs, seconds and tokens per role;
+- `usage.tokens`: totals over CLI receipts.
+
+`job advance` appends each transition to `history` with its time and round, so
+time in each stage, including waiting, is derivable. `factory trace <job>`
+(`job trace`) prints all three, or JSON with `--json`; the dashboard's trace
+view renders the same data. Receipts are the source of truth: deleting job.json's
+derived fields loses nothing that `job sync` can't rebuild, except `history`.
+
+### Cost
+
+A dollar estimate is shown only when every CLI attempt reports one. Partial cost
 data remains in receipts; it is never presented as a complete total. These
 estimates are API-equivalent and do not describe subscription invoices. Missing
-usage does not prevent a job from advancing.
+usage shows as unavailable, never zero, and does not prevent a job from
+advancing.
 
 ## Verification
 
@@ -167,6 +200,7 @@ against temporary Git repositories, a local bare origin, and fake coding/GitHub
 CLIs. It covers mixed-provider routing, grilling on the issue and resuming with
 the answers, track and grilling-round limits, failed checks, requested review changes,
 merging, restart after CLI failure, subscription-login rejection, CLI/check
-timeouts, signal cancellation, stale artifacts and source changes,
+timeouts, signal cancellation, stale artifacts and source changes, per-step
+tracing (durations, uncached/cached tokens, gate receipts, stage history),
 configuration validation, duplicate creation, and scheduler locking. It makes
 no model requests and changes no real GitHub issues or PRs.

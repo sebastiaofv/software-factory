@@ -27,7 +27,10 @@ same runner. Add provider-specific behavior in `factory/lib/adapters.py` and
 keep scheduling and job state independent of the chosen CLI/model. Authentication
 checks must not print credential values or read private CLI token stores.
 Usage estimates must distinguish unavailable data from zero and subscription
-billing from API-equivalent estimates.
+billing from API-equivalent estimates. Every CLI step and gate run must keep
+writing a receipt under `runs/`; `factory trace` and the dashboard's trace view
+are built only from receipts and job.json's `history`, so a step without a
+receipt disappears from debugging.
 
 `factory/bin/job` is the only writer of job.json. Runtime artifacts under
 `factory/jobs/` and checkouts under `.worktrees/` are gitignored; preserve them
