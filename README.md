@@ -82,6 +82,7 @@ factory/bin/factory doctor       # configuration, logins, and installation
 factory/bin/factory run          # drain the queue; also resume interrupted jobs
 factory/bin/factory run 12       # one issue
 factory/bin/factory status       # local jobs and usage
+factory/bin/factory trace 12     # every step of issue 12: time, tokens, verdict
 ```
 
 In Claude Code, use `/factory run` or `/factory run 12`. In Codex, invoke the
@@ -106,11 +107,13 @@ Claude profiles accept `low`, `medium`, `high`, `xhigh`, or `max` (passed as
 ```json
 {
   "profiles": {
-    "claude-strong": { "cli": "claude", "model": "opus", "reasoning_effort": "high" },
+    "claude-fast": { "cli": "claude", "model": "haiku", "reasoning_effort": "low" },
+    "claude-balanced": { "cli": "claude", "model": "sonnet", "reasoning_effort": "medium" },
+    "claude-strong": { "cli": "claude", "model": "opus", "reasoning_effort": "medium" },
     "codex": { "cli": "codex", "model": null, "reasoning_effort": null }
   },
   "steps": {
-    "intake": "codex",
+    "intake": "claude-fast",
     "spec-writer": "codex",
     "builder": "claude-strong",
     "approver": "codex"
@@ -118,17 +121,19 @@ Claude profiles accept `low`, `medium`, `high`, `xhigh`, or `max` (passed as
   "routing": {
     "low": { "code": "codex" },
     "medium": { "code": "codex" },
-    "high": { "code": "claude-strong" }
+    "high": { "code": "codex" }
   },
   "surface_reviewers": {
-    "ui": { "ux": "codex", "ui": "codex" },
+    "ui": { "ui": "claude-balanced" },
     "security": { "security": "claude-strong" }
   }
 }
 ```
 
-This is the profile and routing portion of the configuration; retain the other
-settings. For a single subscription, point every step and reviewer at a profile
+This is the profile and routing portion of the shipped `factory/config.json`
+(which also defines `codex-fast`, `codex-balanced` and `codex-strong`); retain
+the other settings. The `ui` surface adds one reviewer that judges both the
+flow (UX) and the visual design in a single browser session. For a single subscription, point every step and reviewer at a profile
 using that CLI. Another CLI requires an adapter that implements authentication,
 command construction, and result parsing in `factory/lib/adapters.py`.
 
@@ -149,13 +154,32 @@ in the supported JSON event stream, so mixed runs show an unavailable estimate
 instead of treating missing cost as zero. Historical examples retain their
 recorded estimates.
 
+### Tracing a job
+
+Every CLI step and every gate run leaves a receipt in `factory/jobs/<id>/runs/<run>/`
+(`result.json`, plus `prompt.txt`, `stdout.jsonl` and `stderr.log` for CLI steps).
+job.json collects them into `usage.executions` (one row per run: role, round,
+profile, models, verdict or error, start, end, duration, tokens, session id, run
+folder), `usage.by_role` (runs, seconds and tokens per role), and `history`
+(every stage transition with its time).
+
+```bash
+factory/bin/factory trace 12           # table of runs, totals by role, time in each stage
+factory/bin/factory trace 12 --json    # the same, for scripts
+```
+
+The dashboard's job drawer has the same view under **trace: time & tokens**.
+Input tokens are split into **uncached** (not read from the provider's prompt
+cache, including cache writes) and **cached** reads, which providers count
+much more cheaply. Missing usage shows as `-`, never as zero.
+
 ## What's in here
 
 ```text
 .agents/skills/factory/     shared Codex skill and workflow entry point
 .claude/skills/factory/     Claude Code entry point to the same workflow
 factory/
-  bin/factory              runner commands: run, doctor, status
+  bin/factory              runner commands: run, doctor, status, trace
   bin/job                  job state transitions and GitHub side effects
   bin/gate                 deterministic checks in a job's worktree
   bin/route                risk and surfaces → execution profiles

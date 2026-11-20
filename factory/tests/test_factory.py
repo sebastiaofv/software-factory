@@ -69,9 +69,46 @@ class FactoryTests(unittest.TestCase):
         calls = [json.loads(line) for line in (self.base / 'invocations.jsonl').read_text().splitlines()]
         self.assertEqual({c['cli'] for c in calls}, {'claude', 'codex'})
         self.assertEqual(len([c for c in calls if c['role'] == 'builder']), 3)
-        self.assertEqual(len([c for c in calls if c['role'].startswith('reviewer-')]), 8)
+        self.assertEqual(len([c for c in calls if c['role'].startswith('reviewer-')]), 6)
+        self.assertEqual(set(job['agents']['reviewers']), {'code', 'ui', 'security'})
         self.assertEqual(self.git('show', 'origin/main:calc.py'), 'def add(a, b):\n    return a + b')
         self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_trace_records_time_and_tokens_for_every_step(self):
+        self.runner.run(1)
+        job = self.runner.job('001-add-numbers')
+        runs = job['usage']['executions']
+        self.assertEqual([e['started'] for e in runs], sorted(e['started'] for e in runs))
+        cli = [e for e in runs if e['kind'] == 'cli']
+        checks = [e for e in runs if e['kind'] == 'check']
+        self.assertEqual(len(cli), 1 + 1 + 3 + 6 + 1)  # intake, spec, 3 builds, 2 review rounds, approver
+        self.assertEqual([e['verdict'] for e in checks], ['GATE: FAIL', 'GATE: PASS', 'GATE: PASS', 'GATE: PASS'])
+        self.assertEqual(checks[-1]['role'], 'merge-gate')
+        for e in runs:
+            self.assertEqual(e['status'], 'completed')
+            self.assertIsInstance(e['duration_seconds'], (int, float))
+        codex = next(e for e in cli if e['profile']['cli'] == 'codex')
+        self.assertEqual(codex['tokens']['uncached_input_tokens'], 8)  # 12 input, 4 of them cached
+        claude = next(e for e in cli if e['profile']['cli'] == 'claude')
+        self.assertEqual(claude['tokens']['uncached_input_tokens'], 10)
+        self.assertEqual(claude['session_id'], 'test-claude')
+        self.assertTrue((self.repo / 'factory/jobs' / job['id'] / 'runs' / codex['run'] / 'stdout.jsonl').is_file())
+        self.assertEqual(job['usage']['by_role']['builder']['runs'], 3)
+        self.assertEqual(job['usage']['by_role']['gate']['tokens'], {})
+        self.assertEqual(job['usage']['tokens']['uncached_input_tokens'],
+                         sum(e['tokens']['uncached_input_tokens'] for e in cli))
+        self.assertEqual([h['to'] for h in job['history']][:4], ['intake', 'spec', 'build', 'gate'])
+        self.assertEqual(job['history'][-1]['to'], 'merged')
+        text = self.runner.job_command('trace', '1')
+        self.assertIn('uncached in', text)
+        self.assertIn('merge-gate', text)
+        self.assertIn('By role:', text)
+        self.assertIn('created → intake', text)
+        traced = json.loads(self.runner.job_command('trace', '1', '--json'))
+        self.assertEqual(len(traced['executions']), len(runs))
+        out = subprocess.run([str(self.repo / 'factory/bin/factory'), 'trace', '1'], cwd=self.repo,
+                             capture_output=True, text=True, check=True).stdout
+        self.assertIn('reviewer-ui', out)
 
     def github(self):
         return json.loads((self.base / 'fake-github.json').read_text())
@@ -194,7 +231,7 @@ class FactoryTests(unittest.TestCase):
         config = load_config(self.repo)
         config['steps'] = {role: 'codex' for role in config['steps']}
         config['routing'] = {risk: {'code': 'codex'} for risk in config['routing']}
-        config['surface_reviewers'] = {'ui': {'ux': 'codex', 'ui': 'codex'}, 'security': {'security': 'codex'}}
+        config['surface_reviewers'] = {'ui': {'ui': 'codex'}, 'security': {'security': 'codex'}}
         with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'unused-provider-key'}):
             Runner(self.repo, config).doctor()
 

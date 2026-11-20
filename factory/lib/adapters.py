@@ -114,7 +114,9 @@ def parse_result(cli, stdout):
         native = data.get('usage') or {}
         cached = native.get('cache_read_input_tokens', 0)
         written = native.get('cache_creation_input_tokens', 0)
+        # input_tokens is every prompt token; uncached_input_tokens is the part not read from cache.
         usage = {'input_tokens': native.get('input_tokens', 0) + cached + written,
+                 'uncached_input_tokens': native.get('input_tokens', 0) + written,
                  'cached_input_tokens': cached, 'cache_write_input_tokens': written,
                  'output_tokens': native.get('output_tokens', 0)}
         return Result(data.get('session_id'), usage,
@@ -141,7 +143,15 @@ def parse_result(cli, stdout):
             raise FactoryError('codex turn failed; inspect the run log')
     if not completed:
         raise FactoryError('codex returned no completed turn; inspect the run log')
-    return result
+    return Result(result.session_id, with_uncached(result.usage), result.api_equivalent_usd, result.models)
+
+
+def with_uncached(usage):
+    """Add uncached_input_tokens when a provider reports input including cached reads."""
+    usage = dict(usage)
+    if 'uncached_input_tokens' not in usage and isinstance(usage.get('input_tokens'), (int, float)):
+        usage['uncached_input_tokens'] = usage['input_tokens'] - usage.get('cached_input_tokens', 0)
+    return usage
 
 
 def execute(profile, cwd, job_dir, prompt, log_dir, timeout):

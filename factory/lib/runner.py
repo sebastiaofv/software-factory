@@ -29,6 +29,14 @@ def write_json(path, data):
     temp.replace(path)
 
 
+def token_summary(usage):
+    """One line of a step's tokens; unavailable usage is not shown as zero."""
+    if not usage or not isinstance(usage.get('input_tokens'), (int, float)):
+        return 'tokens unavailable'
+    return (f'{usage.get("uncached_input_tokens", usage["input_tokens"]):,} uncached in, '
+            f'{usage.get("cached_input_tokens", 0):,} cached in, {usage.get("output_tokens", 0):,} out')
+
+
 @contextmanager
 def runner_lock(root):
     jobs = root / 'factory/jobs'
@@ -79,7 +87,7 @@ class Runner:
         check = self.root / 'factory/checks.sh'
         if 'factory/checks.sh has no checks yet' in check.read_text():
             raise FactoryError('factory/checks.sh is still the installer template; configure project checks before running jobs')
-        for role in ['intake', 'spec-writer', 'builder', 'approver', 'reviewer-code', 'reviewer-ux', 'reviewer-ui', 'reviewer-security']:
+        for role in ['intake', 'spec-writer', 'builder', 'approver', 'reviewer-code', 'reviewer-ui', 'reviewer-security']:
             if not (self.root / 'factory/prompts' / f'{role}.md').is_file():
                 raise FactoryError(f'missing shared prompt for {role}')
         print('Factory configuration, prompts, GitHub login, and checks: ready', flush=True)
@@ -94,9 +102,12 @@ class Runner:
 
     def prompt(self, job, role, artifact):
         folder = self.jobs / job['id']
+        instructions = self.root / 'factory/prompts' / f'{role}.md'
+        if not instructions.is_file():
+            raise FactoryError(f'{role}: no shared prompt; reroute this job (reviewer-ux was merged into reviewer-ui)')
         worktree = Path(job['worktree']) if role != 'intake' else self.root
         number = int(job['id'].split('-')[0])
-        offset = {'reviewer-ux': 1, 'reviewer-ui': 2}.get(role, 0)
+        offset = {'reviewer-ui': 1}.get(role, 0)
         port = self.config['ports']['base'] + self.config['ports']['step'] * number + offset
         track = (job.get('intake') or {}).get('track') or 'not chosen yet'
         grill = self.grill_round(job)
@@ -116,7 +127,7 @@ class Runner:
             'The only factory artifact you write is the Required output above. '
             'Only the builder may edit project source, and only in its supplied worktree. '
             'If a required tool or permission is unavailable, report the blocker; never claim verification you did not perform.\n\n'
-            + (self.root / 'factory/prompts' / f'{role}.md').read_text()
+            + instructions.read_text()
         )
 
     def grill_round(self, job):
@@ -187,16 +198,18 @@ class Runner:
         artifact = self.artifact(job, role)
         if self.receipt_matches(job, role, commit, profile, artifact):
             return self.validate_artifact(job, role, artifact)
+        prompt = self.prompt(job, role, artifact)
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
         log_dir = self.jobs / job['id'] / 'runs' / f'{stamp}-{role}-{uuid.uuid4().hex[:6]}'
         log_dir.mkdir(parents=True)
-        receipt = {'role': role, 'round': job['round'], 'profile_name': name, 'profile': profile,
-                   'commit': commit, 'started': now(), 'status': 'running', 'billing': 'subscription'}
+        receipt = {'kind': 'cli', 'role': role, 'round': job['round'], 'stage': job['stage'],
+                   'profile_name': name, 'profile': profile, 'commit': commit, 'started': now(),
+                   'status': 'running', 'billing': 'subscription'}
         write_json(log_dir / 'result.json', receipt)
-        prompt = self.prompt(job, role, artifact)
         (log_dir / 'prompt.txt').write_text(prompt)
         before = self.source_state(cwd) if role != 'builder' else None
         started = time.time_ns()
+        clock = time.monotonic()
         print(f'{job["id"]}: {role} → {profile["cli"]} / {profile.get("model") or "CLI default"}', flush=True)
         try:
             result = adapters.execute(profile, cwd, self.jobs / job['id'], prompt, log_dir,
@@ -210,15 +223,19 @@ class Runner:
             if role != 'builder':
                 if self.source_state(cwd) != before:
                     raise FactoryError(f'{role} changed project files or Git history; inspect the worktree before resuming')
-            receipt.update(status='completed', source_sha256=self.source_state(cwd)[1], artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest())
+            receipt.update(status='completed', verdict='SPEC' if role == 'spec-writer' else verdict, source_sha256=self.source_state(cwd)[1],
+                           artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest())
             return verdict
         except Exception as exc:
             receipt.update(status='failed', error=str(exc))
             raise
         finally:
             receipt['ended'] = now()
+            receipt['duration_seconds'] = round(time.monotonic() - clock, 1)
             write_json(log_dir / 'result.json', receipt)
             self.job_command('sync', job['id'])
+            print(f'{job["id"]}: {role} {receipt["status"]} in {receipt["duration_seconds"]:.0f}s, '
+                  f'{token_summary(receipt.get("usage"))}', flush=True)
 
     def publish(self, job):
         if self.git(job, 'branch', '--show-current') != job['branch']:
@@ -342,6 +359,9 @@ def main(root, argv=None):
     run.add_argument('issue', nargs='?', type=int)
     sub.add_parser('doctor', help='check configuration, subscription logins, and installation')
     sub.add_parser('status', help='show local jobs and usage')
+    trace = sub.add_parser('trace', help="show each run of a job with its time and tokens")
+    trace.add_argument('job', help='job id or issue number')
+    trace.add_argument('--json', action='store_true', help='machine-readable trace')
     args = parser.parse_args(argv)
     def interrupt(signum, frame):
         adapters.cancel_all()
@@ -355,6 +375,8 @@ def main(root, argv=None):
             runner.run(args.issue)
         elif args.command == 'doctor':
             runner.doctor()
+        elif args.command == 'trace':
+            print(runner.job_command('trace', args.job, *(['--json'] if args.json else [])))
         else:
             print(runner.job_command('summary'))
     except KeyboardInterrupt:

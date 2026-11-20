@@ -42,7 +42,6 @@ factory/prompts/spec-writer.md
 factory/prompts/builder.md
 factory/prompts/reviewer-code.md
 factory/prompts/reviewer-security.md
-factory/prompts/reviewer-ux.md
 factory/prompts/reviewer-ui.md
 factory/prompts/approver.md
 factory/config.json
@@ -121,8 +120,8 @@ filenames or first-line formats. In particular:
 - Intake: describe the project's purpose so it can judge what belongs, and
   what makes a change simple or complex in this project.
 - Security review: identify auth, payment, data-access, and input-handling areas.
-- UI and UX review: document users, design conventions, and how to run browser
-  verification. The supplied prompts expect an installed `agent-browser` CLI.
+- UI review (one session covers UX and visual design): document users, design
+  conventions, and how to run browser verification. The supplied prompts expect an installed `agent-browser` CLI.
 - Approver: state which changes need a human product or operational decision.
 
 Keep the intake header lines (`DECISION`, `RISK`, `TRACK`, `SURFACES`,
@@ -219,6 +218,13 @@ with `factory/bin/route <id>`; jobs already past intake need their previous
 installation to finish or an explicit migration. The new runner refuses unknown
 legacy profiles rather than silently selecting another provider.
 
+`reviewer-ux` was merged into `reviewer-ui`: one session now judges both the
+flow and the visual design. Merge any project-specific UX instructions into
+`factory/prompts/reviewer-ui.md`, delete `reviewer-ux.md`, and replace a
+`"ui": { "ux": ..., "ui": ... }` surface mapping with `"ui": { "ui": <profile> }`.
+A job routed before the merge that still lists a `ux` reviewer stops with a
+clear error; reroute it, or let the previous installation finish it.
+
 ## 6. Hand over
 
 Keep the current branch. Show the changes and verification results. Explain
@@ -228,4 +234,5 @@ unless the user requested them. Each run can publish and merge real PRs.
 
 Ask the user to label a small issue `factory`, run it, and inspect its PR and
 local dashboard. Explain how to choose CLI profiles and where failures and
-usage receipts appear. Subscription limits and extra-usage settings still apply.
+usage receipts appear: `factory/bin/factory trace <issue>` and the dashboard's
+trace view list every step's time and tokens. Subscription limits and extra-usage settings still apply.

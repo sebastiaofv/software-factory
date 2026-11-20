@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 ROLES = {'intake', 'spec-writer', 'builder', 'approver'}
-REVIEWERS = {'code', 'security', 'ux', 'ui'}
+REVIEWERS = {'code', 'security', 'ui'}
 RISKS = {'low', 'medium', 'high'}
 TRACKS = {'simple', 'complex'}
 

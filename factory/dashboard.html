@@ -206,6 +206,11 @@
   .md a { color: var(--active); }
   .md table { border-collapse: collapse; font-size: 13px; display: block; overflow-x: auto; }
   .md th, .md td { border: 1px solid var(--line); padding: 5px 9px; text-align: left; }
+  .md table.trace { font: 11px/1.5 var(--mono); max-width: none; }
+  .md.wide { max-width: none; }
+  .md table.trace th, .md table.trace td { white-space: nowrap; padding: 3px 7px; }
+  .md table.trace td.n { text-align: right; }
+  .md table.trace tr.bad td { color: var(--human); }
   .verdict {
     display: inline-block; font-family: var(--mono); font-size: 12px; font-weight: 600;
     padding: 4px 10px; border-radius: 6px; margin-bottom: 14px;
@@ -371,10 +376,57 @@ function costLabel(job) {
   return typeof job.cost_usd === 'number' ? `$${job.cost_usd.toFixed(2)} est.` : 'estimate n/a'
 }
 
+const compact = (n) => typeof n !== 'number' ? '-'
+  : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n)
+
+// Uncached input is the part of the prompt not read from cache; cached reads are shown apart.
+function uncachedOf(tokens) {
+  if (typeof tokens?.uncached_input_tokens === 'number') return tokens.uncached_input_tokens
+  if (typeof tokens?.input_tokens === 'number') return tokens.input_tokens - (tokens.cached_input_tokens || 0)
+  return null
+}
+
 function tokenLabel(job) {
   const usage = job.usage?.tokens
   if (!usage || typeof usage.input_tokens !== 'number' || typeof usage.output_tokens !== 'number') return ''
-  return `${(usage.input_tokens + usage.output_tokens).toLocaleString()} tokens`
+  return `${compact(uncachedOf(usage))} uncached in · ${compact(usage.cached_input_tokens || 0)} cached in · ${compact(usage.output_tokens)} out`
+}
+
+function seconds(v) {
+  if (typeof v !== 'number') return '-'
+  const m = Math.floor(v / 60), s = Math.round(v % 60)
+  return m ? `${m}m${String(s).padStart(2, '0')}s` : `${s}s`
+}
+
+const secondsBetween = (a, b) => (a && b) ? (new Date(b) - new Date(a)) / 1000 : null
+
+// Every recorded run (CLI steps and gate checks), totals by role, and the stage history.
+function traceHtml(job) {
+  const runs = job.usage?.executions || []
+  const num = (t, k) => `<td class="n">${esc(compact(t?.[k]))}</td>`
+  const rows = runs.map((e) => {
+    const p = e.profile ? `${e.profile.cli} / ${e.profile.model || 'default'}` : e.kind === 'check' ? 'checks.sh' : '-'
+    const verdict = String(e.verdict || '').replace(/^(VERDICT|STATUS|DECISION|GATE):\s*/, '')
+    return `<tr class="${e.status === 'failed' ? 'bad' : ''}" title="${esc(e.error || e.run || '')}">
+      <td>${esc((e.started || '').slice(11, 19))}</td><td>R${esc(e.round ?? '-')}</td><td>${esc(e.role || '-')}</td>
+      <td>${esc(p)}</td><td>${esc(e.status === 'completed' ? verdict || '-' : e.status || '-')}</td>
+      <td class="n">${esc(seconds(e.duration_seconds ?? secondsBetween(e.started, e.ended)))}</td>
+      <td class="n">${esc(compact(uncachedOf(e.tokens)))}</td>${num(e.tokens, 'cached_input_tokens')}${num(e.tokens, 'output_tokens')}</tr>`
+  }).join('')
+  const roles = Object.entries(job.usage?.by_role || {}).map(([role, t]) =>
+    `<tr><td>${esc(role)}</td><td class="n">${esc(t.runs)}</td><td class="n">${esc(seconds(t.seconds))}</td>
+      <td class="n">${esc(compact(uncachedOf(t.tokens)))}</td>${num(t.tokens, 'cached_input_tokens')}${num(t.tokens, 'output_tokens')}</tr>`).join('')
+  const history = job.history || []
+  const stages = history.map((h, i) => {
+    const end = history[i + 1]?.at || job.ended || new Date().toISOString()
+    return `<tr><td>${esc(h.at.replace('T', ' ').slice(0, 19))}</td><td>${esc(h.from || 'created')} → ${esc(h.to)}</td>
+      <td>R${esc(h.round)}</td><td class="n">${esc(seconds(secondsBetween(h.at, end)))}</td></tr>`
+  }).join('')
+  const head = (cols) => `<thead><tr>${cols.map((c) => `<th>${c}</th>`).join('')}</tr></thead>`
+  return `<h2>Runs</h2>${runs.length ? `<table class="trace">${head(['start (UTC)', 'round', 'step', 'profile', 'result', 'time', 'uncached in', 'cached in', 'out'])}<tbody>${rows}</tbody></table>
+      <p class="note">Failed or interrupted runs are red; hover a row for its run folder or error. Raw prompt, CLI output and receipt: <code>factory/jobs/${esc(job.id)}/runs/&lt;run&gt;/</code>. Also <code>factory/bin/factory trace ${esc(job.issue)}</code>.</p>` : '<p class="note">No recorded runs.</p>'}
+    ${roles ? `<h2>By role</h2><table class="trace">${head(['step', 'runs', 'time', 'uncached in', 'cached in', 'out'])}<tbody>${roles}</tbody></table>` : ''}
+    ${stages ? `<h2>Stages</h2><table class="trace">${head(['at (UTC)', 'transition', 'round', 'time in stage'])}<tbody>${stages}</tbody></table>` : ''}`
 }
 
 function describeProfile(profile) {
@@ -518,6 +570,7 @@ async function listFiles(dir) {
 
 const ORDER = ['issue.md', 'intake.md', 'spec.md', 'build.md', 'decision.md', 'rejection.md']
 const ROUND_ORDER = ['checks', 'review-code', 'review-security', 'review-ux', 'review-ui', 'merge-checks']
+const TRACE = '#trace'
 
 function fileRank(path) {
   if (ORDER.includes(path)) return [0, ORDER.indexOf(path), path]
@@ -550,15 +603,18 @@ async function refreshDrawer() {
   $('d-links').innerHTML = links(job)
 
   const base = `jobs/${job.id}/`
-  const files = sortFiles(await listFiles(base))
-  if (!openPath || !files.includes(openPath)) openPath = files[0] || null
+  const traced = (job.usage?.executions || []).length || (job.history || []).length
+  const files = [...(traced ? [TRACE] : []), ...sortFiles(await listFiles(base))]
+  if (!openPath || !files.includes(openPath)) openPath = files.find((f) => f !== TRACE) || files[0] || null
 
   let text = null
-  if (openPath) {
+  if (openPath === TRACE) {
+    text = traceHtml(job)
+  } else if (openPath) {
     text = await fetchText(base + openPath)
     firstLines.set(base + openPath, text.split('\n')[0].trim())
   }
-  await Promise.all(files.filter((f) => !firstLines.has(base + f)).map(async (f) => {
+  await Promise.all(files.filter((f) => f !== TRACE && !firstLines.has(base + f)).map(async (f) => {
     firstLines.set(base + f, (await fetchText(base + f)).split('\n')[0].trim())
   }))
 
@@ -568,7 +624,7 @@ async function refreshDrawer() {
     const head = g !== group ? `<div class="group">${esc(g)}</div>` : ''
     group = g
     const round = f.match(/^round-(\d+)\//)
-    const name = round
+    const name = f === TRACE ? 'trace: time &amp; tokens' : round
       ? `<span class="rn">R${round[1]} </span>${esc(f.split('/')[1].replace(/^review-|\.md$/g, ''))}`
       : esc(f)
     const t = tone(firstLines.get(base + f) || '')
@@ -578,7 +634,9 @@ async function refreshDrawer() {
 
   if (text !== openText) {
     openText = text
-    $('d-doc').innerHTML = text === null ? '<p class="note">Intake hasn’t written anything yet.</p>' : markdown(text)
+    $('d-doc').classList.toggle('wide', openPath === TRACE)
+    $('d-doc').innerHTML = text === null ? '<p class="note">Intake hasn’t written anything yet.</p>'
+      : openPath === TRACE ? text : markdown(text)
   }
 }
 

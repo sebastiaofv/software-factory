@@ -81,7 +81,7 @@ reject. job.json's `intake.grill_round` is derived from the archived rounds.
 Profiles contain `cli`, optional `model`, and optional `reasoning_effort`.
 `steps` selects profiles for intake, spec-writer, builder, and approver.
 `routing` supplies reviewers by risk; `surface_reviewers` adds UI or security
-reviewers. All selected roles resolve through the same profile mechanism.
+reviewers. The UI reviewer covers both UX and visual design in one browser session. All selected roles resolve through the same profile mechanism.
 Unsupported CLIs or profile references fail configuration validation.
 
 Routing snapshots profile names into the accepted job. Profile settings are
@@ -147,9 +147,14 @@ JSON result or Codex's JSONL events. Receipts record CLI, requested profile,
 reported models when available, normalized token usage, session ID, and timestamps.
 No scan of private CLI transcript directories is required.
 
-Input-token totals include cached reads and cache writes for both adapters; native
-fields remain available in each invocation log. job.json aggregates the normalized
-token fields and execution metadata from receipts.
+Input-token totals include cached reads and cache writes for both adapters;
+`uncached_input_tokens` is the part not read from cache (Claude's input plus
+cache writes, Codex's input minus cached input). Native fields remain available
+in each invocation log. The gate writes a `kind: check` receipt with its
+duration and verdict, so check time sits beside model time. job.json aggregates
+receipts into `usage.executions` (one row per run, ordered by start),
+`usage.by_role`, and token totals, and `job advance` appends each transition to
+`history`. `factory trace <job>` prints them.
 A dollar estimate is shown only when every attempt reports one. Partial cost
 data remains in receipts; it is never presented as a complete total. These
 estimates are API-equivalent and do not describe subscription invoices. Missing

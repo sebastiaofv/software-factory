@@ -23,8 +23,7 @@
   },
   "surface_reviewers": {
     "ui": {
-      "ux": "claude-balanced",
-      "ui": "codex"
+      "ui": "claude-balanced"
     },
     "security": {
       "security": "claude-strong"

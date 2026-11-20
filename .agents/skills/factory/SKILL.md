@@ -16,6 +16,7 @@ from `factory/config.json`.
 - Run one labeled issue: `factory/bin/factory run <issue-number>`.
 - Check installation and subscription logins: `factory/bin/factory doctor`.
 - Show jobs and usage: `factory/bin/factory status`.
+- Show where a job's time and tokens went, step by step: `factory/bin/factory trace <issue>`.
 
 Execute the requested command and report its result. Keep the runner attached to
 an active terminal session until it exits, communicating meaningful progress.

@@ -16,6 +16,7 @@ Usage:
   job agents <job> <json>        record the routed agent set (called by factory/bin/route)
   job sync <job>                 refresh reviews, gate and cost from the job's files
   job summary [<job>...]         table of jobs: issue, stage, PR, cost, time
+  job trace <job> [--json]       every run with its time and tokens, totals by role, stage history
 
 <job> is a job id (004-dark-mode) or an issue number (12).
 """
@@ -249,30 +250,65 @@ def label(kind, number, add=None, remove=None):
 # ---- Usage from runner-owned CLI receipts ---------------------------------
 
 
+def seconds_between(start, end):
+    try:
+        a, b = (datetime.fromisoformat(t.replace("Z", "+00:00")) for t in (start, end))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return round((b - a).total_seconds(), 1)
+
+
+def with_uncached(tokens):
+    tokens = {k: v for k, v in (tokens or {}).items() if isinstance(v, (int, float))}
+    if "uncached_input_tokens" not in tokens and "input_tokens" in tokens:
+        tokens["uncached_input_tokens"] = tokens["input_tokens"] - tokens.get("cached_input_tokens", 0)
+    return tokens
+
+
 def sync_usage(job):
+    """Aggregate run receipts into job.json: totals, per-role totals, and one trace row per run."""
+    runs = job_dir(job["id"]) / "runs"
     receipts = []
-    for path in sorted((job_dir(job["id"]) / "runs").glob("*/result.json")):
-        receipts.append(json.loads(path.read_text()))
+    for path in sorted(runs.glob("*/result.json")):
+        receipts.append((path.parent.name, json.loads(path.read_text())))
     if not receipts:
         return  # Preserve historical example data; never infer zero spend from missing usage.
-    tokens = {}
+    tokens, by_role = {}, {}
     estimates = []
     complete_cost = True
     executions = []
-    for receipt in receipts:
-        for key, value in receipt.get("usage", {}).items():
-            if isinstance(value, (int, float)):
+    for run_name, receipt in sorted(receipts, key=lambda r: (r[1].get("started") or "", r[0])):
+        kind = receipt.get("kind", "cli")
+        step_tokens = with_uncached(receipt.get("usage")) if kind == "cli" else {}
+        duration = receipt.get("duration_seconds")
+        if duration is None and receipt.get("ended"):
+            duration = seconds_between(receipt.get("started"), receipt["ended"])
+        role = receipt.get("role")
+        totals = by_role.setdefault(role, {"runs": 0, "seconds": 0, "tokens": {}})
+        totals["runs"] += 1
+        totals["seconds"] = round(totals["seconds"] + (duration or 0), 1)
+        if kind == "cli":
+            for key, value in step_tokens.items():
                 tokens[key] = tokens.get(key, 0) + value
-        estimate = receipt.get("api_equivalent_usd")
-        if estimate is None:
-            complete_cost = False
-        else:
-            estimates.append(estimate)
-        executions.append({key: receipt.get(key) for key in
-                           ("role", "round", "profile", "status", "started", "ended", "models")})
-    job["usage"] = {"billing": "subscription", "tokens": tokens, "executions": executions,
-                    "api_equivalent_complete": complete_cost}
-    job["cost_usd"] = round(sum(estimates), 4) if complete_cost else None
+                totals["tokens"][key] = totals["tokens"].get(key, 0) + value
+            estimate = receipt.get("api_equivalent_usd")
+            if estimate is None:
+                complete_cost = False
+            else:
+                estimates.append(estimate)
+        executions.append({
+            "run": run_name, "kind": kind, "role": role, "round": receipt.get("round"),
+            "stage": receipt.get("stage"), "profile_name": receipt.get("profile_name"),
+            "profile": receipt.get("profile"), "models": receipt.get("models"),
+            "status": receipt.get("status"), "verdict": receipt.get("verdict"),
+            "started": receipt.get("started"), "ended": receipt.get("ended"),
+            "duration_seconds": duration, "tokens": step_tokens or None,
+            "api_equivalent_usd": receipt.get("api_equivalent_usd"),
+            "session_id": receipt.get("session_id"), "error": receipt.get("error"),
+        })
+    job["usage"] = {"billing": "subscription", "tokens": tokens, "by_role": by_role,
+                    "executions": executions, "api_equivalent_complete": complete_cost}
+    job["cost_usd"] = round(sum(estimates), 4) if complete_cost and estimates else None
 
 
 # ---- Sync: fields derived from files ---------------------------------------
@@ -485,6 +521,7 @@ def advance(job, stage):
 
     job["stage"] = stage
     job["ended"] = now() if stage in TERMINAL | WAITING else None
+    job.setdefault("history", []).append({"from": old, "to": stage, "round": job["round"], "at": now()})
     return job
 
 
@@ -522,6 +559,7 @@ def cmd_create(number):
         "intake": None, "agents": dict(CONFIG["steps"], reviewers={}), "gate": None, "reviews": {},
         "cost_usd": None, "started": now(), "ended": None,
         "usage": {"billing": "subscription", "tokens": {}, "executions": []},
+        "history": [{"from": None, "to": "intake", "round": 0, "at": now()}],
     }
     write_issue_md(job)
     save(job)
@@ -665,6 +703,56 @@ def cmd_summary(args):
     print(f"{estimate}; subscription billing is separate; unavailable estimates shown as n/a")
 
 
+def fmt_tokens(tokens, key):
+    value = (tokens or {}).get(key)
+    return f"{value:,}" if isinstance(value, (int, float)) else "-"
+
+
+def fmt_seconds(value):
+    if value is None:
+        return "-"
+    minutes, secs = divmod(int(value), 60)
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+
+
+def cmd_trace(job, as_json):
+    """Every recorded run of a job, in order, with its time and tokens; then totals by role."""
+    sync(job)
+    usage = job.get("usage") or {}
+    if as_json:
+        print(json.dumps({"id": job["id"], "history": job.get("history", []),
+                          "executions": usage.get("executions", []), "by_role": usage.get("by_role", {}),
+                          "tokens": usage.get("tokens", {})}, indent=2))
+        return
+    rows = [("started", "round", "step", "profile", "status", "verdict", "time", "uncached in", "cached in", "out", "run")]
+    for e in usage.get("executions", []):
+        profile = e.get("profile") or {}
+        label = f"{profile.get('cli')}/{profile.get('model') or 'default'}" if profile else "-"
+        rows.append(((e.get("started") or "-")[:19].replace("T", " "), str(e.get("round")), e.get("role") or "-",
+                     label, e.get("status") or "-", (e.get("verdict") or "-").replace("VERDICT: ", "").replace("STATUS: ", "")
+                     .replace("DECISION: ", "").replace("GATE: ", ""), fmt_seconds(e.get("duration_seconds")),
+                     fmt_tokens(e.get("tokens"), "uncached_input_tokens"), fmt_tokens(e.get("tokens"), "cached_input_tokens"),
+                     fmt_tokens(e.get("tokens"), "output_tokens"), e.get("run") or "-"))
+    if len(rows) == 1:
+        print(f"{job['id']}: no recorded runs")
+    else:
+        widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+        for r in rows:
+            print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    print("\nBy role:")
+    for role, t in usage.get("by_role", {}).items():
+        print(f"  {role}: {t['runs']} run(s), {fmt_seconds(t['seconds'])}, "
+              f"{fmt_tokens(t['tokens'], 'uncached_input_tokens')} uncached in, "
+              f"{fmt_tokens(t['tokens'], 'cached_input_tokens')} cached in, {fmt_tokens(t['tokens'], 'output_tokens')} out")
+    print("\nStages:")
+    history = job.get("history", [])
+    for i, h in enumerate(history):
+        end = history[i + 1]["at"] if i + 1 < len(history) else (job["ended"] or now())
+        print(f"  {h['at']}  {h['from'] or 'created'} → {h['to']} (round {h['round']}), "
+              f"{fmt_seconds(seconds_between(h['at'], end))} in {h['to']}")
+    print(f"\nRaw prompts, CLI output and receipts: factory/jobs/{job['id']}/runs/<run>/")
+
+
 def main(argv):
     if not argv or argv[0] in {"-h", "--help"}:
         print(__doc__.strip())
@@ -698,6 +786,8 @@ def main(argv):
             print(f"{job['id']}: {job['stage']} round {job['round']} gate {job['gate'] or '-'} {reviews}".rstrip())
         elif cmd == "summary":
             cmd_summary(args)
+        elif cmd == "trace" and len(args) in {1, 2} and args[1:] in ([], ["--json"]):
+            cmd_trace(resolve(args[0]), args[1:] == ["--json"])
         else:
             die(f"bad arguments: {' '.join(argv)}\n\n{__doc__.strip()}")
     except (Refused, FactoryError) as e:
