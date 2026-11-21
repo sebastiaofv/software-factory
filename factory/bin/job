@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lib.config import FactoryError, load_config
+from lib.config import FactoryError, gate_failure, load_config
 
 REPO = Path(__file__).resolve().parents[2]
 FACTORY = REPO / "factory"
@@ -465,15 +465,17 @@ def advance(job, stage):
         if stage == "review":
             require(h.get("GATE") == "PASS", "the gate didn't pass")
             job["reviews"] = {r: "pending" for r in reviewers(job)}
+            job["check_streak"] = None
         else:
             require(h.get("GATE") == "FAIL", "the gate passed")
-            last = job["round"] >= job["round_limit"]
-            require(last == (stage == "needs-human"),
-                    f"round {job['round']} of {job['round_limit']}: go to {'needs-human' if last else 'build'}")
-            if last:
-                escalate(job, f"The gate failed in round {job['round']}, the last allowed round. "
-                              f"See round-{job['round']}/checks.md.")
+            job["check_streak"], why = gate_failure(CONFIG, job, h["COMMIT"])
+            require(bool(why) == (stage == "needs-human"),
+                    f"go to needs-human: {why}" if why else "the builder is still making progress: go to build")
+            if why:
+                escalate(job, why)
             else:
+                # Check-fixing rounds don't use up the review rounds in max_rounds.
+                job["round_limit"] += 1
                 next_round(job)
 
     elif old == "review":
@@ -502,6 +504,7 @@ def advance(job, stage):
         require(feedback and feedback[-1].stat().st_mtime > (d / "decision.md").stat().st_mtime,
                 "use `job feedback` to send a job back to the builder")
         job["round_limit"] = job["round"] + CONFIG["max_rounds"]
+        job["check_streak"] = None
         next_round(job)
         label("issue", job["issue"], remove=LABELS["needs_human"])
 
@@ -555,7 +558,7 @@ def cmd_create(number):
         "pr": None, "pr_url": None,
         "branch": f"factory/{job_id}",
         "worktree": str(REPO / ".worktrees" / job_id),
-        "stage": "intake", "round": 0, "round_limit": CONFIG["max_rounds"],
+        "stage": "intake", "round": 0, "round_limit": CONFIG["max_rounds"], "check_streak": None,
         "intake": None, "agents": dict(CONFIG["steps"], reviewers={}), "gate": None, "reviews": {},
         "cost_usd": None, "started": now(), "ended": None,
         "usage": {"billing": "subscription", "tokens": {}, "executions": []},

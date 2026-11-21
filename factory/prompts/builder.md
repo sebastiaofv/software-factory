@@ -82,9 +82,33 @@ round's builder as `checks.md` and `checks.log`.
 
 Run the fast checks AGENTS.md lists (lint, typecheck, unit tests) and the
 end-to-end tests that cover your change, selected by file or name. Rerun a
-failing test after a fix, not a passing one, and never use `--repeat-each` to
-hunt flakiness. A test outside your change that fails goes in build.md under
-Validation with its output; don't debug unrelated code.
+failing test after a fix, not a passing one. A test outside your change that
+fails while you work goes in build.md under Validation with its output.
+
+### When the gate failed
+
+Failed checks never end the job: the runner sends every gate failure back to
+you until `factory/checks.sh` passes. A round that commits nothing can't fix
+anything, so after `max_stalled_rounds` (in `factory/config.json`) failed
+gates in a row on an unchanged commit, the runner escalates the job to a
+human. Every round after a gate failure must change code.
+
+Read `checks.md` and `checks.log` from the previous round first. Make every
+failure pass, including tests outside your change and tests that look flaky:
+
+- Reproduce the failing test on its own, selected by file and name. Run it
+  several times (`--repeat-each`, or your runner's equivalent) when it passes
+  once, to confirm the flakiness and later confirm the fix.
+- Find the root cause, usually in the test: a fixed wait, a race with an
+  animation or autosave, a shared fixture, a selector that matches two
+  elements, port or timing assumptions under parallel workers. Fix that cause
+  in the test or the code. Never skip, delete, or loosen a test's assertion,
+  add a blind retry, or raise a timeout to hide the failure.
+- Keep such fixes minimal and list them under Changes and in the round's Log,
+  marked as outside the spec.
+- Write `STATUS: BLOCKED` when the failure is in the environment rather than
+  the repository (a missing service, a broken toolchain, no network), or when
+  the fix needs a protected file.
 
 Then verify every acceptance criterion and record the evidence in build.md: the
 command you ran and its result, or what the page showed.
@@ -137,7 +161,8 @@ The commands you ran and whether each one passed.
 ## Log
 ### Round <N>
 What you did this round. On rounds after the first, list each gate failure or
-review finding and what you did about it, or why you didn't change anything.
+review finding and what you did about it. Only a review finding can be left
+unchanged, with the reason; a gate failure always needs a fix.
 ```
 
 `## Summary` is 3 to 5 short bullets a human can skim on the dashboard. The

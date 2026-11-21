@@ -1,6 +1,8 @@
 {
   "concurrency": 3,
   "max_rounds": 3,
+  "max_check_rounds": null,
+  "max_stalled_rounds": 2,
   "max_grill_rounds": 3,
   "simple_track_risks": ["low"],
   "base_branch": "main",

@@ -18,6 +18,12 @@ def load_config(root):
         value = config.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise FactoryError(f'{key} must be a positive integer')
+    value = config.get('max_check_rounds')
+    if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+        raise FactoryError('max_check_rounds must be null, 0 (unlimited), or a positive integer')
+    value = config.setdefault('max_stalled_rounds', 2)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise FactoryError('max_stalled_rounds must be a positive integer')
     simple = config.get('simple_track_risks')
     if not isinstance(simple, list) or not set(simple) <= RISKS or 'high' in simple:
         raise FactoryError('simple_track_risks must list low and/or medium risk')
@@ -55,6 +61,28 @@ def load_config(root):
         if not isinstance(name, str) or name not in profiles:
             raise FactoryError(f'unknown profile {name!r}')
     return config
+
+
+def gate_failure(config, job, head):
+    """After a failed gate on commit `head`: the job's new check streak, and why to
+    escalate instead of building again, or None.
+
+    Failed checks alone never end a job. It escalates only when the builder stops
+    making progress: `max_stalled_rounds` failed gates in a row on a commit the
+    previous failed gate already ran, or, when set, `max_check_rounds` failed
+    gates in a row."""
+    streak = job.get('check_streak') or {'failures': 0, 'unchanged': 0, 'commit': None}
+    failures = streak['failures'] + 1
+    unchanged = streak['unchanged'] + 1 if streak['commit'] == head else 0
+    new = {'failures': failures, 'unchanged': unchanged, 'commit': head}
+    if unchanged >= config['max_stalled_rounds']:
+        return new, (f'The gate failed on commit {head[:7]} again after {unchanged} builder '
+                     f'round{"s" if unchanged > 1 else ""} that changed nothing (max_stalled_rounds is '
+                     f'{config["max_stalled_rounds"]}). See round-{job["round"]}/checks.md.')
+    if config.get('max_check_rounds') and failures >= config['max_check_rounds']:
+        return new, (f'The gate failed {failures} rounds in a row, the max_check_rounds limit. '
+                     f'See round-{job["round"]}/checks.md.')
+    return new, None
 
 
 def agent_set(config, intake):

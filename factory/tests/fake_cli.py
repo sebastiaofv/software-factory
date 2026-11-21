@@ -95,7 +95,14 @@ elif role == 'intake':
 elif role == 'spec-writer':
     body = '# Addition\n\n## Summary\n- Add numbers.\n\n## Acceptance criteria\n1. add(1, 2) returns 3.\n'
 elif role == 'builder':
-    Path('calc.py').write_text('def add(a, b):\n    return ' + ('0' if round_number == 1 else 'a + b') + '\n')
+    broken_until = int(os.environ.get('FACTORY_TEST_BROKEN_ROUNDS', '1'))
+    if os.environ.get('FACTORY_TEST_STALL'):
+        if round_number == 1:
+            Path('calc.py').write_text('def add(a, b):\n    return 0\n')
+    elif round_number <= broken_until:
+        Path('calc.py').write_text(f'def add(a, b):\n    return a + b + {round_number}\n')
+    else:
+        Path('calc.py').write_text('def add(a, b):\n    return a + b\n')
     body = 'STATUS: READY\n\n## Summary\n- Implemented addition.\n'
 elif role.startswith('reviewer-'):
     verdict = 'CHANGES' if role == 'reviewer-code' and round_number == 2 else 'PASS'

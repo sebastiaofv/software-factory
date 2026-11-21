@@ -254,6 +254,55 @@ class FactoryTests(unittest.TestCase):
         with self.assertRaisesRegex(FactoryError, 'simple_track_risks'):
             load_config(self.repo)
 
+    def set_config(self, **values):
+        config = json.loads((self.repo / 'factory/config.json').read_text())
+        config.update(values)
+        (self.repo / 'factory/config.json').write_text(json.dumps(config))
+        self.runner = Runner(self.repo)
+
+    def test_failed_checks_keep_building_past_max_rounds(self):
+        with patch.dict(os.environ, {'FACTORY_TEST_BROKEN_ROUNDS': '5'}):
+            self.runner.run(1)
+        job = self.runner.job('001-add-numbers')
+        self.assertEqual(job['stage'], 'merged')
+        self.assertEqual(job['round'], 6)  # 5 failed gates, well past max_rounds, then a passing round
+        self.assertIsNone(job['check_streak'])
+        self.assertEqual([h['to'] for h in job['history']].count('gate'), 6)
+
+    def test_rounds_that_change_nothing_escalate_after_max_stalled_rounds(self):
+        with patch.dict(os.environ, {'FACTORY_TEST_STALL': '1'}):
+            self.runner.run(1)
+        job = self.runner.job('001-add-numbers')
+        self.assertEqual(job['stage'], 'needs-human')
+        self.assertEqual(job['round'], 3)
+        self.assertEqual(job['check_streak']['unchanged'], 2)
+        why = (self.repo / 'factory/jobs' / job['id'] / 'decision.md').read_text()
+        self.assertIn('2 builder rounds that changed nothing', why)
+        self.assertIn(['--add-label', 'factory:needs-human'], self.github()['label_edits'])
+
+    def test_max_check_rounds_caps_consecutive_gate_failures(self):
+        self.set_config(max_check_rounds=2)
+        with patch.dict(os.environ, {'FACTORY_TEST_BROKEN_ROUNDS': '5'}):
+            self.runner.run(1)
+        job = self.runner.job('001-add-numbers')
+        self.assertEqual((job['stage'], job['round']), ('needs-human', 2))
+        why = (self.repo / 'factory/jobs' / job['id'] / 'decision.md').read_text()
+        self.assertIn('failed 2 rounds in a row, the max_check_rounds limit', why)
+
+    def test_check_round_settings_are_validated(self):
+        for values in [{'max_check_rounds': -1}, {'max_check_rounds': 'many'}, {'max_stalled_rounds': 0}]:
+            with self.subTest(values=values):
+                config = json.loads((SOURCE / 'factory/config.json').read_text())
+                config.update(values)
+                (self.repo / 'factory/config.json').write_text(json.dumps(config))
+                with self.assertRaisesRegex(FactoryError, next(iter(values))):
+                    load_config(self.repo)
+        config = json.loads((SOURCE / 'factory/config.json').read_text())
+        config['max_check_rounds'] = 0
+        del config['max_stalled_rounds']
+        (self.repo / 'factory/config.json').write_text(json.dumps(config))
+        self.assertEqual(load_config(self.repo)['max_stalled_rounds'], 2)
+
     def test_cli_failure_does_not_advance_and_can_resume(self):
         with patch.dict(os.environ, {'FACTORY_TEST_FAIL_ROLE': 'spec-writer'}):
             with self.assertRaises(FactoryError):
