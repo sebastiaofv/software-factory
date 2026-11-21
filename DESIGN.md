@@ -33,6 +33,17 @@ attempt to resume a provider's private conversation.
 
 The builder edits and verifies code, then writes build.md. The runner commits
 explicit changed paths, pushes only the assigned branch, and opens its draft PR.
+A failed gate always sends the job back to the builder: checks are never a
+reason to stop, and the builder must fix every failure, including flaky tests
+outside its change, at the root cause. Unbounded rounds need a no-progress
+guard because coding CLIs bill against a subscription. The gate records
+`check_streak` in job.json: consecutive failed gates and, of those, how many
+ran on the same commit as the failed gate before. When `unchanged` reaches
+`max_stalled_rounds`, or `failures` reaches an optional `max_check_rounds`,
+`job advance` accepts only needs-human. A passing gate or human feedback clears
+the streak. Check-fixing rounds extend `round_limit` by one, so they don't use
+up the `max_rounds` budget for requested review changes.
+
 Reviewers run in parallel once the gate passes. The approver escalates sensitive
 changes using the project-specific rules in its prompt. An approval triggers
 base-branch synchronization, another gate, a push, and GitHub's merge command.
@@ -91,7 +102,10 @@ Unsupported CLIs or profile references fail configuration validation.
 Routing snapshots profile names into the accepted job. Profile settings are
 resolved at execution time and recorded with each attempt. Editing a profile
 changes future attempts; completed-stage reuse requires an exact profile match.
-`max_grill_rounds` bounds intake's question rounds, and `simple_track_risks`
+`max_rounds` bounds builder rounds for requested review changes.
+`max_stalled_rounds` (a positive integer, default 2) and `max_check_rounds`
+(`null` or `0` for unlimited, the default) are the only limits on failed
+checks. `max_grill_rounds` bounds intake's question rounds, and `simple_track_risks`
 bounds the simple track. `step_timeout_seconds` bounds coding CLI calls and `check_timeout_seconds`
 bounds project checks. Runner commands receive another 30 seconds for startup,
 cleanup, and writing failure reports. A timed-out or cancelled step is stopped

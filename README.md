@@ -68,8 +68,14 @@ rerun the factory: it rereads the issue and continues. After
 `max_grill_rounds` rounds, intake must accept with its recommended answers or
 reject.
 
-Failed checks and requested changes return to the builder up to `max_rounds`;
-after that, the job goes to a human. A blocked builder also escalates.
+Failed checks always return to the builder, which must fix every failure,
+flaky or unrelated tests included, until the gate passes. Only a builder that
+stops making progress escalates: after `max_stalled_rounds` (default 2) failed
+gates in a row on an unchanged commit, or after `max_check_rounds` failed gates
+in a row when you set that cap (`null`, the default, or `0` means unlimited).
+Requested review changes return to the builder up to `max_rounds`; check-fixing
+rounds don't count against it. After that, or when the builder is blocked, the
+job goes to a human.
 The runner runs up to `concurrency` jobs at once. Reviewers within each job run
 in parallel: a code reviewer always, a UI reviewer (UX and visual design, in one
 browser session) for `ui` changes, and a security reviewer for `security`
@@ -235,6 +241,8 @@ Gate rows have no tokens: they run `checks.sh`, not a model.
    (`merge-checks.*` for the gate before merging).
 4. Repeated builder rounds usually mean the gate or a reviewer keeps failing:
    compare that round's `checks.md` or `review-*.md` with the next `build.md`.
+   job.json's `check_streak` counts the current run of failed gates
+   (`failures`) and of rounds that changed nothing (`unchanged`).
 
 The `session_id` in each row is the CLI's own session, useful when reporting a
 problem with that CLI. The factory never resumes it.

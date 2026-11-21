@@ -15,7 +15,7 @@ import time
 import uuid
 
 from . import adapters
-from .config import FactoryError, load_config, profile_for
+from .config import FactoryError, gate_failure, load_config, profile_for
 
 TERMINAL = {'merged', 'rejected', 'needs-human', 'needs-info'}
 
@@ -294,7 +294,11 @@ class Runner:
                 gate = self.call([self.bin / 'gate', job_id], check=False)
                 if gate.returncode not in {0, 1}:
                     raise FactoryError(gate.stderr or 'gate failed to execute')
-                target = 'review' if gate.returncode == 0 else 'needs-human' if job['round'] >= job['round_limit'] else 'build'
+                if gate.returncode == 0:
+                    target = 'review'
+                else:
+                    _, why = gate_failure(self.config, job, self.git(job, 'rev-parse', 'HEAD'))
+                    target = 'needs-human' if why else 'build'
                 self.job_command('advance', job_id, target)
             elif stage == 'review':
                 with ThreadPoolExecutor(max_workers=len(job['agents']['reviewers'])) as pool:

@@ -101,9 +101,14 @@ Adapt `factory/config.json`:
 - Set `max_grill_rounds` (question rounds intake may post on an issue) and
   `simple_track_risks` (risks allowed on the simple track: `low`, optionally
   `medium`, never `high`).
-- Set `concurrency`, `max_rounds`, `step_timeout_seconds`, and
-  `check_timeout_seconds` to appropriate project limits. Start with concurrency
-  1 when evaluating a new installation.
+- Set `concurrency`, `max_rounds` (builder rounds for requested review
+  changes), `step_timeout_seconds`, and `check_timeout_seconds` to appropriate
+  project limits. Start with concurrency 1 when evaluating a new installation.
+- Failed checks don't escalate on their own: the builder keeps fixing them
+  until the gate passes. `max_stalled_rounds` (default 2) escalates after that
+  many failed gates in a row on an unchanged commit. Leave `max_check_rounds`
+  `null` (or `0`) for no cap, or set a positive integer to escalate after that
+  many failed gates in a row.
 - Move `ports.base` if the project already uses its allocated range.
 
 The runner rejects recognized API-key or alternate-provider environment
@@ -213,8 +218,9 @@ hook entries after preserving their customizations; keep unrelated agents and
 hooks. Both skill entry points now delegate to the shared runner.
 
 Use the new profiles/steps/routing structure while retaining the target's base
-branch, checks, limits, and protected paths. Add `max_grill_rounds` and
-`simple_track_risks` to an older config.json, and merge project customizations
+branch, checks, limits, and protected paths. Add `max_grill_rounds`,
+`simple_track_risks`, `max_check_rounds` and `max_stalled_rounds` to an older
+config.json, and merge project customizations
 into the new intake, spec-writer, builder, reviewer-code, reviewer-ui and
 approver prompts.
 An accepted intake.md from before tracks has no `TRACK` line; let such jobs
