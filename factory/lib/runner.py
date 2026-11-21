@@ -229,6 +229,9 @@ class Runner:
             return verdict
         except Exception as exc:
             receipt.update(status='failed', error=str(exc))
+            partial = getattr(exc, 'partial', None)
+            if partial is not None and 'usage' not in receipt:
+                receipt.update(asdict(partial), usage_partial=True)
             raise
         finally:
             receipt['ended'] = now()

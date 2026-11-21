@@ -75,10 +75,16 @@ other jobs.
 
 ## Verify
 
-Run `bash <main checkout>/factory/checks.sh` from the worktree
-(`cd <worktree> && bash <main checkout>/factory/checks.sh`). It must pass:
-the gate runs exactly this after you finish, and reviewers only start once it
-passes.
+Don't run `factory/checks.sh` or the whole end-to-end suite, even where
+AGENTS.md says to. The gate runs `factory/checks.sh` after you finish;
+reviewers only start once it passes, and a failure comes back to the next
+round's builder as `checks.md` and `checks.log`.
+
+Run the fast checks AGENTS.md lists (lint, typecheck, unit tests) and the
+end-to-end tests that cover your change, selected by file or name. Rerun a
+failing test after a fix, not a passing one, and never use `--repeat-each` to
+hunt flakiness. A test outside your change that fails goes in build.md under
+Validation with its output; don't debug unrelated code.
 
 Then verify every acceptance criterion and record the evidence in build.md: the
 command you ran and its result, or what the page showed.

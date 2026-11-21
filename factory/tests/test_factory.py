@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 SOURCE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SOURCE / 'factory'))
-from lib.adapters import check_login, command, execute, parse_result
+from lib.adapters import check_login, command, execute, parse_result, partial_result
 from lib.config import FactoryError, load_config
 from lib.runner import Runner, runner_lock
 
@@ -278,6 +278,31 @@ class FactoryTests(unittest.TestCase):
                 with self.subTest(cli=cli), self.assertRaises(FactoryError):
                     check_login(cli, self.repo)
 
+    def test_claude_stream_json_result(self):
+        stream = '\n'.join(json.dumps(e) for e in [
+            {'type': 'system', 'subtype': 'init', 'session_id': 's'},
+            {'type': 'assistant', 'message': {'id': 'm', 'usage': {'input_tokens': 1, 'output_tokens': 1}}},
+            {'type': 'result', 'is_error': False, 'session_id': 's', 'total_cost_usd': .5,
+             'usage': {'input_tokens': 4, 'cache_read_input_tokens': 10, 'output_tokens': 3}, 'modelUsage': {'m1': {}}}])
+        result = parse_result('claude', stream)
+        self.assertEqual(result.session_id, 's')
+        self.assertEqual(result.usage['input_tokens'], 14)
+        self.assertEqual(result.usage['cached_input_tokens'], 10)
+        self.assertEqual(result.models, ['m1'])
+        with self.assertRaises(FactoryError):
+            parse_result('claude', stream.rsplit('\n', 1)[0])
+
+    def test_partial_usage_counts_each_api_call_once(self):
+        call = {'type': 'assistant', 'message': {'id': 'a', 'model': 'm1',
+                'usage': {'input_tokens': 2, 'cache_read_input_tokens': 5, 'output_tokens': 1}}}
+        later = {'type': 'assistant', 'message': {'id': 'b', 'model': 'm1', 'usage': {'input_tokens': 1, 'output_tokens': 4}}}
+        stream = '\n'.join(json.dumps(e) for e in [call, call, later]) + '\n{"type": "assis'
+        result = partial_result('claude', stream)
+        self.assertEqual(result.usage['input_tokens'], 8)
+        self.assertEqual(result.usage['output_tokens'], 5)
+        self.assertEqual(result.models, ['m1'])
+        self.assertEqual(partial_result('codex', 'garbage').usage, {})
+
     def test_bad_provider_output_and_missing_usage(self):
         for cli, payload in [('claude', '{}'), ('codex', '{"type":"turn.failed"}'), ('codex', 'garbage')]:
             with self.subTest(cli=cli), self.assertRaises(FactoryError):
@@ -294,7 +319,25 @@ class FactoryTests(unittest.TestCase):
                 self.runner.step(self.runner.job(job_id), 'intake')
         self.assertEqual(self.runner.job(job_id)['stage'], 'intake')
         receipts = list((self.repo / 'factory/jobs' / job_id / 'runs').glob('*/result.json'))
-        self.assertEqual(json.loads(receipts[0].read_text())['status'], 'failed')
+        receipt = json.loads(receipts[0].read_text())
+        self.assertEqual(receipt['status'], 'failed')
+        self.assertTrue(receipt['usage_partial'])
+        self.assertEqual(receipt['usage']['input_tokens'], 10)
+        self.assertGreater((receipts[0].parent / 'stdout.jsonl').stat().st_size, 0)
+
+    def test_timeout_stops_servers_in_their_own_process_group(self):
+        self.runner.config['step_timeout_seconds'] = 1
+        job_id = self.runner.job_command('create', '1')
+        with patch.dict(os.environ, {'FACTORY_TEST_SLEEP': '1', 'FACTORY_TEST_ORPHAN': '1'}):
+            with self.assertRaisesRegex(FactoryError, 'exceeded 1s'):
+                self.runner.step(self.runner.job(job_id), 'intake')
+        pid = int((self.base / 'orphan.pid').read_text())
+        self.addCleanup(lambda: subprocess.run(['kill', '-9', str(pid)], capture_output=True))
+        deadline = time.monotonic() + 10
+        while subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True,
+                             text=True).stdout.strip() not in {'', 'Z', 'Z+'}:
+            self.assertLess(time.monotonic(), deadline, 'server outlived the timed-out step')
+            time.sleep(.1)
 
     def test_duplicate_creation_and_runner_lock(self):
         cmd = [str(self.repo / 'factory/bin/job'), 'create', '1']

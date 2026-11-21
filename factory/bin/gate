@@ -22,6 +22,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib.adapters import signal_groups, tree_groups  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[2]
 FACTORY = REPO / "factory"
 CONFIG = json.loads((FACTORY / "config.json").read_text())
@@ -64,12 +67,15 @@ def run_checks(worktree):
         log, _ = process.communicate(timeout=timeout)
         code = process.returncode
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGTERM)
+        # Playwright and similar tools start servers in their own process groups.
+        groups = {process.pid} | tree_groups(process.pid)
+        signal_groups(groups, signal.SIGTERM)
         try:
             log, _ = process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            log, _ = process.communicate()
+            log = ""
+        signal_groups(groups, signal.SIGKILL)
+        log = (log or "") + process.communicate()[0]
         code = 124
         log += f"\nChecks exceeded {timeout}s.\n"
     return code, log, int(time.monotonic() - start)

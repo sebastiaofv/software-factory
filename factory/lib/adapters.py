@@ -7,6 +7,7 @@ import signal
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,20 +22,60 @@ def cancel_all():
     _cancelled.set()
     with _active_lock:
         processes = list(_active)
-    for process in processes:
+    threads = [threading.Thread(target=terminate_tree, args=(process,)) for process in processes]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+
+def tree_groups(root):
+    """Process groups of root's descendants.
+
+    Tools such as Playwright start servers in their own process group, so
+    killing the step's group alone leaves them running. Collect the groups
+    while the tree is intact, before anything exits and is reparented.
+    """
+    try:
+        listing = subprocess.run(['ps', '-A', '-o', 'pid=,ppid=,pgid='], capture_output=True,
+                                 text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    children, groups = {}, {}
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 3 and all(f.isdigit() for f in fields):
+            pid, ppid, pgid = map(int, fields)
+            children.setdefault(ppid, []).append(pid)
+            groups[pid] = pgid
+    found, pending = set(), [root]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            found.add(groups[child])
+            pending.append(child)
+    return found - {os.getpgrp(), root}
+
+
+def signal_groups(groups, sig):
+    for group in groups:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
+            os.killpg(group, sig)
+        except (ProcessLookupError, PermissionError):
             pass
-    for process in processes:
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
+
+
+def terminate_tree(process, grace=5):
+    """Stop a process started with start_new_session and every group it spawned."""
+    groups = {process.pid} | tree_groups(process.pid)
+    signal_groups(groups, signal.SIGTERM)
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    # Servers that ignore SIGTERM, or outlive their parent's exit, still get killed.
+    time.sleep(0.2)
+    signal_groups(groups, signal.SIGKILL)
+    process.wait()
 
 
 API_ENV = {
@@ -81,7 +122,8 @@ class Result:
 def command(profile, cwd, job_dir):
     cli = profile['cli']
     if cli == 'claude':
-        args = ['claude', '--print', '--output-format', 'json', '--permission-mode', 'dontAsk',
+        # stream-json writes each event as it happens, so a killed step still leaves its transcript.
+        args = ['claude', '--print', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'dontAsk',
                 '--allowedTools', 'Read,Glob,Grep,Edit,Write,Bash', '--tools', 'Read,Glob,Grep,Edit,Write,Bash',
                 '--add-dir', str(job_dir)]
         if profile.get('reasoning_effort'):
@@ -100,26 +142,71 @@ def command(profile, cwd, job_dir):
     return args
 
 
-def parse_result(cli, stdout):
-    if cli == 'claude':
+def _claude_usage(native):
+    cached = native.get('cache_read_input_tokens', 0)
+    written = native.get('cache_creation_input_tokens', 0)
+    # input_tokens is every prompt token; uncached_input_tokens is the part not read from cache.
+    return {'input_tokens': native.get('input_tokens', 0) + cached + written,
+            'uncached_input_tokens': native.get('input_tokens', 0) + written,
+            'cached_input_tokens': cached, 'cache_write_input_tokens': written,
+            'output_tokens': native.get('output_tokens', 0)}
+
+
+def _claude_events(stdout):
+    events = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
         try:
-            data = json.loads(stdout)
+            events.append(json.loads(line))
         except ValueError as exc:
             raise FactoryError('claude returned invalid JSON; inspect the run log') from exc
+    return events
+
+
+def partial_result(cli, stdout):
+    """Usage so far from a step that never finished, such as one that timed out."""
+    if cli != 'claude':
+        try:
+            return parse_result(cli, stdout, require_completion=False)
+        except FactoryError:
+            return Result()
+    events = []
+    for line in stdout.splitlines():
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            pass  # A killed CLI can leave its last line half written.
+    result, native, models = Result(), {}, []
+    # One API call can span several assistant events with the same message id and usage.
+    calls = {}
+    for event in events:
+        if event.get('type') == 'system' and event.get('subtype') == 'init':
+            result.session_id = event.get('session_id')
+        message = event.get('message') if event.get('type') == 'assistant' else None
+        if isinstance(message, dict) and isinstance(message.get('usage'), dict):
+            calls[message.get('id') or len(calls)] = message['usage']
+            if message.get('model') and message['model'] not in models:
+                models.append(message['model'])
+    for usage in calls.values():
+        for key in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'output_tokens'):
+            if isinstance(usage.get(key), (int, float)):
+                native[key] = native.get(key, 0) + usage[key]
+    if native:
+        result.usage = _claude_usage(native)
+    result.models = models
+    return result
+
+
+def parse_result(cli, stdout, require_completion=True):
+    if cli == 'claude':
+        data = next((e for e in reversed(_claude_events(stdout)) if e.get('type') == 'result'), {})
         if data.get('is_error') or data.get('type') != 'result':
             raise FactoryError('claude did not complete successfully; inspect the run log')
         if data.get('permission_denials'):
             raise FactoryError('claude denied a required tool; inspect the run log and CLI permissions')
         cost = data.get('total_cost_usd')
-        native = data.get('usage') or {}
-        cached = native.get('cache_read_input_tokens', 0)
-        written = native.get('cache_creation_input_tokens', 0)
-        # input_tokens is every prompt token; uncached_input_tokens is the part not read from cache.
-        usage = {'input_tokens': native.get('input_tokens', 0) + cached + written,
-                 'uncached_input_tokens': native.get('input_tokens', 0) + written,
-                 'cached_input_tokens': cached, 'cache_write_input_tokens': written,
-                 'output_tokens': native.get('output_tokens', 0)}
-        return Result(data.get('session_id'), usage,
+        return Result(data.get('session_id'), _claude_usage(data.get('usage') or {}),
                       float(cost) if isinstance(cost, (int, float)) else None,
                       list((data.get('modelUsage') or {}).keys()))
     result = Result()
@@ -141,7 +228,7 @@ def parse_result(cli, stdout):
                     result.usage[key] = result.usage.get(key, 0) + value
         elif kind == 'turn.failed':
             raise FactoryError('codex turn failed; inspect the run log')
-    if not completed:
+    if require_completion and not completed:
         raise FactoryError('codex returned no completed turn; inspect the run log')
     return Result(result.session_id, with_uncached(result.usage), result.api_equivalent_usd, result.models)
 
@@ -175,16 +262,11 @@ def execute(profile, cwd, job_dir, prompt, log_dir, timeout):
             process.communicate(prompt, timeout=timeout)
         except BaseException as exc:
             # Also reap shells and dev servers spawned by the timed-out coding CLI.
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-            except ProcessLookupError:
-                pass
+            terminate_tree(process)
             if isinstance(exc, subprocess.TimeoutExpired):
-                raise FactoryError(f'{profile["cli"]} step exceeded {timeout}s; inspect {log_dir}') from exc
+                error = FactoryError(f'{profile["cli"]} step exceeded {timeout}s; inspect {log_dir}')
+                error.partial = partial_result(profile['cli'], (log_dir / 'stdout.jsonl').read_text())
+                raise error from exc
             raise
         finally:
             with _active_lock:

@@ -68,6 +68,14 @@ round_number = int(re.search(r'Round: (\d+)', prompt).group(1))
 record = {'cli': name, 'role': role, 'round': round_number, 'args': args, 'cwd': str(Path.cwd())}
 fd = os.open(root / 'invocations.jsonl', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
 os.write(fd, (json.dumps(record) + '\n').encode()); os.close(fd)
+if name == 'claude':
+    print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'test-claude'}))
+    print(json.dumps({'type': 'assistant', 'message': {'id': 'msg-1', 'model': 'test-model',
+                      'usage': {'input_tokens': 7, 'cache_read_input_tokens': 3, 'output_tokens': 2}}}), flush=True)
+if os.environ.get('FACTORY_TEST_ORPHAN'):
+    # Like a Playwright webServer: a child in its own process group.
+    server = subprocess.Popen(['sleep', '300'], start_new_session=True)
+    (root / 'orphan.pid').write_text(str(server.pid))
 if os.environ.get('FACTORY_TEST_SLEEP'):
     time.sleep(30)
 if os.environ.get('FACTORY_TEST_FAIL_ROLE') == role:

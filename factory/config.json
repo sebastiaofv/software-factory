@@ -40,7 +40,7 @@
     "base": 5100,
     "step": 10
   },
-  "step_timeout_seconds": 1800,
+  "step_timeout_seconds": 3600,
   "check_timeout_seconds": 900,
   "profiles": {
     "claude-fast": {

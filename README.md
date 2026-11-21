@@ -177,7 +177,7 @@ went and why it stopped.
 |---|---|
 | `factory/jobs/<id>/runs/<run>/result.json` | One receipt per CLI step and per gate run: role, round, stage, profile, models, commit, status, verdict or error, start, end, `duration_seconds`, tokens, session id. Gate receipts (`kind: check`) also hold the exit code and protected-path changes. |
 | `runs/<run>/prompt.txt` | The exact prompt the CLI received. |
-| `runs/<run>/stdout.jsonl` | The CLI's native output: Claude's JSON result or Codex's JSONL events, with native usage fields. |
+| `runs/<run>/stdout.jsonl` | The CLI's native output as it happens: Claude's stream-json events or Codex's JSONL events, with native usage fields. A step that timed out keeps its output so far. |
 | `runs/<run>/stderr.log` | The CLI's error output. |
 | `job.json` → `usage.executions` | Every receipt as one row, in start order, with the run folder name. |
 | `job.json` → `usage.by_role` | Runs, seconds and tokens per role (`intake`, `builder`, `gate`, `reviewer-code`, ...). |

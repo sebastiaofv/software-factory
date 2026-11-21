@@ -22,6 +22,8 @@ flowchart LR
 review → approve loop. `factory/bin/job` is the only writer of job.json and owns
 GitHub transition effects. `factory/bin/gate` runs the main checkout's checks
 inside the job's worktree and rejects modifications to protected paths.
+It is the only place the full checks run: the builder runs fast checks and the
+tests covering its change, and leaves the full suite to the gate.
 
 A role gets its shared prompt, explicit paths, job/round identifiers, and the
 required output file. Each attempt starts a fresh CLI session. Earlier specs,
@@ -92,7 +94,9 @@ changes future attempts; completed-stage reuse requires an exact profile match.
 `max_grill_rounds` bounds intake's question rounds, and `simple_track_risks`
 bounds the simple track. `step_timeout_seconds` bounds coding CLI calls and `check_timeout_seconds`
 bounds project checks. Runner commands receive another 30 seconds for startup,
-cleanup, and writing failure reports.
+cleanup, and writing failure reports. A timed-out or cancelled step is stopped
+with every process group it started, so servers that tools such as Playwright
+start in their own group don't outlive it.
 
 The execution module's public work is to verify login, construct a CLI command,
 execute it with a bounded lifetime, and normalize its result. Adding another
@@ -156,7 +160,8 @@ role, round, stage, profile name and settings, commit, status, start and end
 times, `duration_seconds` (monotonic), reported models, normalized token usage,
 session ID, any API-equivalent estimate, and on success the verdict (the
 artifact's first line; `SPEC` for the spec writer) and the source and artifact
-checksums. A failed attempt records its error. The gate writes a `kind: check`
+checksums. A failed attempt records its error. A timed-out attempt also records
+the usage its streamed output reports so far, marked `usage_partial`. The gate writes a `kind: check`
 receipt for each run, including the one before merging (role `merge-gate`),
 with its duration, verdict, exit code, protected-path changes and report path,
 so check time sits beside model time. Prompts and native output sit in the same
